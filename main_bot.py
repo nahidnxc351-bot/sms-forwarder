@@ -232,12 +232,10 @@ def country_select_callback(call):
         avail = len(db["stock"].get(country, []))
         
         markup = types.InlineKeyboardMarkup()
-        for size in [10, 20, 50, 100]:
+        # এখানে ২০ এবং একবারে সব নেওয়ার রিমেইনিং অপশন বাদ দিয়ে শুধু ১০, ৫০, ১০০ ফিক্সড করা হয়েছে
+        for size in [10, 50, 100]:
             if avail >= size:
                 markup.add(types.InlineKeyboardButton(f"📁 Get {size} Numbers (.txt)", callback_data=f"pullfile_{country}_{size}"))
-        
-        if avail > 0 and avail not in [10, 20, 50, 100]:
-            markup.add(types.InlineKeyboardButton(f"📁 Get Remaining [{avail}] (.txt)", callback_data=f"pullfile_{country}_{avail}"))
             
         bot.edit_message_text(f"🌍 **Country:** `{country}`\n🔢 **Available:** `{avail}`\n\nSelect package pack size options below:", 
                               chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=markup)
@@ -337,7 +335,7 @@ def handle_admin_broadcast(message):
         db = load_db()
         users_data = db.get("users", {})
         if not users_data:
-            bot.reply_to(message, "❌ বটের ডাটাবেজে কোনো ইউজার খুঁজে পাওয়া যায়নি।")
+            bot.reply_to(message, "❌ বটের ডাটাবেজে কোনো ইউজার খুঁজে斻ানি।")
             return
             
         status_msg = bot.reply_to(message, f"📢 {len(users_data)} জন ইউজারের ইনবক্সে নোটিশ পাঠানো এবং অটো-পিন প্রসেস শুরু হচ্ছে...")
