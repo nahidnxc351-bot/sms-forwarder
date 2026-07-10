@@ -124,7 +124,6 @@ def sms_forwarder_loop():
                                         
                                     db["users"][target_uid]["history"][today]["count"] += 1
                                     db["users"][target_uid]["history"][today]["earn"] = round(float(db["users"][target_uid]["history"][today].get("earn", 0.0)) + commission, 4)
-                                    save_db(db)
                                     
                                     code = extract_otp(otp_msg)
                                     
@@ -142,8 +141,24 @@ def sms_forwarder_loop():
                                                  f"💬 **Message:** {otp_msg}\n"
                                                  f"🔑 **Code:** `{code}`\n"
                                                  f"🎁 **Commission:** `+{commission} $`")
-                                    try: bot.send_message(int(target_uid), inbox_text, parse_mode='Markdown')
-                                    except: pass
+                                    
+                                    try: 
+                                        # কাস্টমারের ইনবক্সে ওটিপি পাঠানোর আগে পুরানো ওটিপি মেসেজ আনপিন করা
+                                        old_pinned = db["users"][target_uid].get("last_pinned_msg_id")
+                                        if old_pinned:
+                                            try: bot.unpin_chat_message(chat_id=int(target_uid), message_id=old_pinned)
+                                            except: pass
+                                        
+                                        # নতুন ওটিপি পাঠানো এবং সেটি সাথে সাথে পিন করা
+                                        sent_inbox = bot.send_message(int(target_uid), inbox_text, parse_mode='Markdown')
+                                        try: bot.pin_chat_message(chat_id=int(target_uid), message_id=sent_inbox.message_id, disable_notification=False)
+                                        except: pass
+                                        
+                                        db["users"][target_uid]["last_pinned_msg_id"] = sent_inbox.message_id
+                                    except: 
+                                        pass
+                                    
+                                    save_db(db)
             del data
             gc.collect()
             time.sleep(5)
@@ -232,7 +247,6 @@ def country_select_callback(call):
         avail = len(db["stock"].get(country, []))
         
         markup = types.InlineKeyboardMarkup()
-        # এখানে ২০ এবং একবারে সব নেওয়ার রিমেইনিং অপশন বাদ দিয়ে শুধু ১০, ৫০, ১০০ ফিক্সড করা হয়েছে
         for size in [10, 50, 100]:
             if avail >= size:
                 markup.add(types.InlineKeyboardButton(f"📁 Get {size} Numbers (.txt)", callback_data=f"pullfile_{country}_{size}"))
@@ -322,7 +336,7 @@ def admin_set_price_final_save(message, prefix):
     except:
         bot.reply_to(message, "❌ Invalid value matrix format. Price parsing dropped.")
 
-# --- ADMIN BROADCAST & AUTO PIN/UNPIN FEATURE ---
+# --- ADMIN BROADCAST COMMAND ---
 @bot.message_handler(commands=['broadcast'])
 def handle_admin_broadcast(message):
     if message.from_user.id != ADMIN_ID: return
@@ -335,35 +349,20 @@ def handle_admin_broadcast(message):
         db = load_db()
         users_data = db.get("users", {})
         if not users_data:
-            bot.reply_to(message, "❌ বটের ডাটাবেজে কোনো ইউজার খুঁজে斻ানি।")
+            bot.reply_to(message, "❌ বটের ডাটাবেজে কোনো ইউজার খুঁজে পাওয়া যায়নি।")
             return
             
-        status_msg = bot.reply_to(message, f"📢 {len(users_data)} জন ইউজারের ইনবক্সে নোটিশ পাঠানো এবং অটো-পিন প্রসেস শুরু হচ্ছে...")
+        status_msg = bot.reply_to(message, f"📢 {len(users_data)} জন ইউজারের ইনবক্সে নোটিশ পাঠানো প্রসেস শুরু হচ্ছে...")
         success_count = 0
         
         for u_id_str, info in users_data.items():
             try:
-                # ১. আগের মেসেজ পিন করা থাকলে তা আনপিন করা
-                old_pinned_id = info.get("last_pinned_msg_id")
-                if old_pinned_id:
-                    try: bot.unpin_chat_message(chat_id=int(u_id_str), message_id=old_pinned_id)
-                    except: pass
-                
-                # ২. নতুন চ্যাট মেসেজ সেন্ড করা
-                sent = bot.send_message(chat_id=int(u_id_str), text=broadcast_text, parse_mode='HTML')
-                
-                # ৩. নতুন মেসেজটি কাস্টমারের চ্যাটে পিন করা
-                try: bot.pin_chat_message(chat_id=int(u_id_str), message_id=sent.message_id, disable_notification=False)
-                except: pass
-                
-                # ৪. ডাটাবেজে নতুন মেসেজ আইডি ট্র্যাক করা
-                db["users"][u_id_str]["last_pinned_msg_id"] = sent.message_id
+                bot.send_message(chat_id=int(u_id_str), text=broadcast_text, parse_mode='HTML')
                 success_count += 1
             except:
                 pass
                 
-        save_db(db)
-        bot.send_message(ADMIN_ID, f"✅ **ব্রডকাস্ট সম্পন্ন!**\n🎯 সফলভাবে {success_count} জন ইউজারের ইনবক্সে মেসেজ পিন করা হয়েছে।")
+        bot.send_message(ADMIN_ID, f"✅ **ব্রডকাস্ট সম্পন্ন!**\n🎯 সফলভাবে {success_count} জন ইউজারের ইনবক্সে মেসেজ পাঠানো হয়েছে।")
     except Exception as e:
         bot.send_message(ADMIN_ID, f"❌ Broadcast Engine Error: {e}")
 
@@ -512,7 +511,7 @@ def handle_withdraw_input(message):
         db["users"][str(u_id)]["balance"] = 0.0
         save_db(db)
         bot.send_message(message.chat.id, "⏳ **Withdraw request sent to Admin.**")
-        bot.send_message(ADMIN_ID, f"📥 **WITHDRAW REQUEST**\n\n👤 User: {message.from_user.first_name}\n🆔 ID: `{u_id}`\n💰 Amount: `{current_bal}` $\n📝 Details: `{details}`\n\nTo Pay: `/pay {u_id} TxID` or caption photo with `{u_id}`")
+        bot.send_message(ADMIN_ID, f"📥 **WITHDRAW REQUEST**\n\n👤 User: {message.from_user.first_name}\n🆔 ID: `{u_id}`\n💰 Amount: `{current_bal}` $\n📝 Details: `{details}`\n\nTo Pay:\n`/pay {u_id} TxID`")
     except: pass
 
 # --- DYNAMIC FILE IMPORT LOOP ---
@@ -624,17 +623,28 @@ def admin_status_management(message):
                 except: pass
     except: pass
 
+# --- FIX `/pay` SYSTEM WORK PERFECTLY ---
 @bot.message_handler(commands=['pay'])
 def admin_pay_text(message):
     if message.from_user.id != ADMIN_ID: return
     try:
-        parts = message.text.split(' ', 2)
-        t_id, tx_id = parts[1].strip(), parts[2].strip()
+        # সঠিক রেগুলার এক্সপ্রেশন দিয়ে আইডি এবং ট্রানজেকশন আলাদা করা
+        match = re.match(r'/pay\s+(\d+)\s+(.+)', message.text.strip())
+        if not match:
+            bot.reply_to(message, "💡 **Format:** `/pay USER_ID TxID_or_Details` \nExample: `/pay 6394277892 bkash-123456`")
+            return
+            
+        t_id = match.group(1)
+        tx_id = match.group(2)
+        
         user_msg = f"✅ **WITHDRAW PAID SUCCESSFUL**\n━━━━━━━━━━━━━━━━━━━━\n🔔 **Status:** PAID\n🆔 **TxID:** `{tx_id}`"
-        try: bot.send_message(int(t_id), user_msg, parse_mode='Markdown')
-        except: pass
-        bot.reply_to(message, "🚀 Dispatched.")
-    except: pass
+        try: 
+            bot.send_message(int(t_id), user_msg, parse_mode='Markdown')
+            bot.reply_to(message, f"🚀 Withdraw Alert Successfully Sent to User `{t_id}`.")
+        except Exception as err:
+            bot.reply_to(message, f"❌ User blocked bot or invalid ID: {err}")
+    except Exception as e:
+        bot.reply_to(message, f"❌ Pay Engine Error: {e}")
 
 @bot.message_handler(content_types=['photo'])
 def admin_photo_payout(message):
