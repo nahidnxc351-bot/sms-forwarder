@@ -21,9 +21,6 @@ bot = telebot.TeleBot(BOT_TOKEN, threaded=False)
 processed_sms = set()
 DATA_FILE = 'bot_data.json'
 
-# Global temporary holding matrix for numbers pending admin release approval
-PENDING_PACKS = {}
-
 def load_db():
     try:
         if os.path.exists(DATA_FILE):
@@ -45,13 +42,13 @@ def get_user(u_id, username="Unknown"):
     uid_str = str(u_id)
     
     if int(u_id) == ADMIN_ID:
-        db["users"][uid_str] = {"status": "allowed", "balance": 9999.0, "stats": {}, "history": {}}
+        db["users"][uid_str] = {"status": "allowed", "balance": 9999.0, "stats": {}, "history": {}, "last_pinned_msg_id": None}
         db["users"][uid_str]["username"] = username
         save_db(db)
         return db["users"][uid_str]
         
     if uid_str not in db["users"]:
-        db["users"][uid_str] = {"status": "pending", "balance": 0.0, "stats": {}, "history": {}}
+        db["users"][uid_str] = {"status": "pending", "balance": 0.0, "stats": {}, "history": {}, "last_pinned_msg_id": None}
     db["users"][uid_str]["username"] = username
     save_db(db)
     return db["users"][uid_str]
@@ -100,7 +97,6 @@ def sms_forwarder_loop():
                                 
                                 clean_num = re.sub(r'\D', '', num)
                                 
-                                # Dynamic Prefix extraction based on registered prices database keys
                                 c_code = "Unknown"
                                 price_keys = sorted(list(db.get("prices", {}).keys()), key=len, reverse=True)
                                 for pk in price_keys:
@@ -128,7 +124,6 @@ def sms_forwarder_loop():
                                         
                                     db["users"][target_uid]["history"][today]["count"] += 1
                                     db["users"][target_uid]["history"][today]["earn"] = round(float(db["users"][target_uid]["history"][today].get("earn", 0.0)) + commission, 4)
-                                    save_db(db)
                                     
                                     code = extract_otp(otp_msg)
                                     
@@ -146,8 +141,21 @@ def sms_forwarder_loop():
                                                  f"💬 **Message:** {otp_msg}\n"
                                                  f"🔑 **Code:** `{code}`\n"
                                                  f"🎁 **Commission:** `+{commission} $`")
-                                    try: bot.send_message(int(target_uid), inbox_text, parse_mode='Markdown')
-                                    except: pass
+                                    
+                                    try: 
+                                        # আগের ওটিপি মেসেজ ইনবক্স থেকে ডিলিট করে দেওয়া (ক্লিন রাখার জন্য)
+                                        old_msg_id = db["users"][target_uid].get("last_pinned_msg_id")
+                                        if old_msg_id:
+                                            try: bot.delete_message(chat_id=int(target_uid), message_id=old_msg_id)
+                                            except: pass
+                                        
+                                        # নতুন ওটিপি পাঠানো
+                                        sent_inbox = bot.send_message(int(target_uid), inbox_text, parse_mode='Markdown')
+                                        db["users"][target_uid]["last_pinned_msg_id"] = sent_inbox.message_id
+                                    except: 
+                                        pass
+                                    
+                                    save_db(db)
             del data
             gc.collect()
             time.sleep(5)
@@ -206,7 +214,7 @@ def handle_one_click_approval(call):
             except: pass
     except: pass
 
-# --- BUY LOGIC WITH CHOSEN 10/20/50/100 CAP SYSTEM ---
+# --- BUY LOGIC ---
 @bot.message_handler(func=lambda m: m.text in ["🛒 Buy Numbers", "/buy"])
 def buy_numbers_trigger(message):
     try:
@@ -236,13 +244,9 @@ def country_select_callback(call):
         avail = len(db["stock"].get(country, []))
         
         markup = types.InlineKeyboardMarkup()
-        for size in [10, 20, 50, 100]:
+        for size in [10, 50, 100]:
             if avail >= size:
-                admin_label = " ⏳ (Admin Approval Required)" if size == 100 else ""
-                markup.add(types.InlineKeyboardButton(f"📁 Get {size} Numbers (.txt){admin_label}", callback_data=f"pullfile_{country}_{size}"))
-        
-        if avail > 0 and avail not in [10, 20, 50, 100]:
-            markup.add(types.InlineKeyboardButton(f"📁 Get Remaining [{avail}] (.txt)", callback_data=f"pullfile_{country}_{avail}"))
+                markup.add(types.InlineKeyboardButton(f"📁 Get {size} Numbers (.txt)", callback_data=f"pullfile_{country}_{size}"))
             
         bot.edit_message_text(f"🌍 **Country:** `{country}`\n🔢 **Available:** `{avail}`\n\nSelect package pack size options below:", 
                               chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=markup)
@@ -250,12 +254,10 @@ def country_select_callback(call):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('pullfile_'))
 def deliver_file_callback(call):
-    global PENDING_PACKS
     try:
         parts = call.data.split('_')
         country, count = parts[1], int(parts[2])
         u_id = call.from_user.id
-        u_name = call.from_user.username or call.from_user.first_name
         
         db = load_db()
         if len(db["stock"].get(country, [])) < count:
@@ -264,29 +266,7 @@ def deliver_file_callback(call):
             
         selected = db["stock"][country][:count]
         db["stock"][country] = db["stock"][country][count:]
-        save_db(db)
         
-        if count == 100:
-            pack_id = f"pack_{u_id}_{int(time.time())}"
-            PENDING_PACKS[pack_id] = {
-                "user_id": u_id,
-                "country": country,
-                "numbers": selected
-            }
-            
-            try: bot.delete_message(call.message.chat.id, call.message.message_id)
-            except: pass
-            
-            bot.send_message(call.message.chat.id, "⏳ **Your request for [100 Numbers Pack] is sent to Admin for approval!**\nOnce approved, the file will be dropped into your chat loop instantly.")
-            
-            adm_markup = types.InlineKeyboardMarkup()
-            adm_markup.add(
-                types.InlineKeyboardButton("🟢 Approve Pack", callback_data=f"apk_approve_{pack_id}"),
-                types.InlineKeyboardButton("❌ Deny Pack", callback_data=f"apk_deny_{pack_id}")
-            )
-            bot.send_message(ADMIN_ID, f"⚠️ **100 NUMBERS FILE REQUEST**\n\n👤 **User:** {u_name}\n🆔 **ID:** `{u_id}`\n🌍 **Country:** `{country}`\n\nAuthorize bulk export dispatch approval?", reply_markup=adm_markup)
-            return
-
         for num in selected:
             db["mapping"][str(num)] = u_id
         save_db(db)
@@ -300,51 +280,90 @@ def deliver_file_callback(call):
         bot.send_document(call.message.chat.id, bio, caption=f"✅ **Delivered {count} numbers for {country}!**\n\nOTPs will hit your inbox instantly.")
     except: pass
 
-# --- BULK PACKS APPROVAL HANDLERS ---
-@bot.callback_query_handler(func=lambda call: call.data.startswith('apk_'))
-def handle_admin_bulk_pack_decision(call):
-    global PENDING_PACKS
+# --- SETPRICE PANEL ---
+@bot.message_handler(commands=['setprice'])
+def admin_set_price_init(message):
+    if message.from_user.id != ADMIN_ID: return
+    try:
+        db = load_db()
+        prices = db.get("prices", {})
+        
+        markup = types.InlineKeyboardMarkup()
+        if prices:
+            for prefix, val in prices.items():
+                markup.add(types.InlineKeyboardButton(f"⚙️ +{prefix} ➡️ {val} $", callback_data=f"prfx_edit_{prefix}"))
+        
+        markup.add(types.InlineKeyboardButton("➕ Add New Prefix", callback_data="prfx_add_new"))
+        
+        bot.send_message(message.chat.id, "⚙️ **[SET PRICE PANEL]**\n\nনিচের লিস্ট থেকে যে প্রিফিক্সের প্রাইস চেঞ্জ করতে চান সেটিতে ক্লিক করুন অথবা নতুন প্রিফিক্স যোগ করুন:", reply_markup=markup)
+    except: pass
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('prfx_'))
+def handle_price_callback_routing(call):
     try:
         if call.from_user.id != ADMIN_ID: return
-        action = "approve" if "approve" in call.data else "deny"
-        pack_id = call.data.replace('apk_approve_', '').replace('apk_deny_', '')
+        action = call.data
         
-        if pack_id not in PENDING_PACKS:
-            bot.answer_callback_query(call.id, "❌ Error: Session expired!", show_alert=True)
+        if action == "prfx_add_new":
+            p = bot.send_message(call.message.chat.id, "⚙️ Enter the target country code prefix (e.g., `263`, `257`):", reply_markup=types.ForceReply(selective=True))
+            bot.register_for_reply(p, admin_set_price_prefix_step)
+        elif action.startswith("prfx_edit_"):
+            prefix = action.replace("prfx_edit_", "")
+            p = bot.send_message(call.message.chat.id, f"💰 **Prefix Code:** `+{prefix}`\n\nEnter the new per-SMS payout commission rate (e.g., `0.015`):", reply_markup=types.ForceReply(selective=True))
+            bot.register_for_reply(p, lambda msg: admin_set_price_final_save(msg, prefix))
+    except: pass
+
+def admin_set_price_prefix_step(message):
+    prefix = re.sub(r'\D', '', message.text.strip())
+    if not prefix:
+        bot.reply_to(message, "❌ Invalid input. Prefix text must be numbers only.")
+        return
+    p = bot.send_message(message.chat.id, f"💰 **Prefix Code:** `+{prefix}`\n\nEnter the per-SMS payout commission rate (e.g., `0.012`):", reply_markup=types.ForceReply(selective=True))
+    bot.register_for_reply(p, lambda msg: admin_set_price_final_save(msg, prefix))
+
+def admin_set_price_final_save(message, prefix):
+    try:
+        price = float(message.text.strip())
+        db = load_db()
+        if "prices" not in db: db["prices"] = {}
+        
+        db["prices"][str(prefix)] = price
+        save_db(db)
+        bot.reply_to(message, f"✅ **Commissions Map Configured!**\n📍 Prefix Route: `+{prefix}`\n💵 Custom Share Rate: `{price}` $")
+    except:
+        bot.reply_to(message, "❌ Invalid value matrix format. Price parsing dropped.")
+
+# --- BROADCAST COMMAND ---
+@bot.message_handler(commands=['broadcast'])
+def handle_admin_broadcast(message):
+    if message.from_user.id != ADMIN_ID: return
+    try:
+        broadcast_text = message.text.replace('/broadcast', '').strip()
+        if not broadcast_text:
+            bot.reply_to(message, "❌ **ফরম্যাট ভুল!**\n\nকমান্ডের সাথে আপনার মেসেজটি লিখুন।\nযেমন: `/broadcast Burundi নতুন নাম্বার স্টক করা হয়েছে!`")
             return
             
-        meta = PENDING_PACKS[pack_id]
-        u_id = meta["user_id"]
-        country = meta["country"]
-        numbers = meta["numbers"]
-        
         db = load_db()
+        users_data = db.get("users", {})
+        if not users_data:
+            bot.reply_to(message, "❌ বটের ডাটাবেজে কোনো ইউজার খুঁজে পাওয়া যায়নি।")
+            return
+            
+        bot.reply_to(message, f"📢 {len(users_data)} জন ইউজারের ইনবক্সে নোটিশ পাঠানো প্রসেস শুরু হচ্ছে...")
+        success_count = 0
         
-        if action == "approve":
-            for num in numbers:
-                db["mapping"][str(num)] = u_id
-            save_db(db)
-            
-            file_data = "\n".join(numbers)
-            bio = io.BytesIO(file_data.encode('utf-8'))
-            bio.name = f"{country}_100_approved_numbers.txt"
-            
-            try: bot.send_document(int(u_id), bio, caption=f"🎉 **Admin approved your request!**\nHere are your `100` numbers for `{country}`.")
-            except: pass
-            bot.edit_message_text(f"✅ **Bulk Pack Approved!**\nFile successfully delivered to User ID: `{u_id}`", chat_id=call.message.chat.id, message_id=call.message.message_id)
-        else:
-            if country not in db["stock"]: db["stock"][country] = []
-            db["stock"][country].extend(numbers)
-            save_db(db)
-            try: bot.send_message(int(u_id), f"❌ **Your request for 100 Numbers file for {country} was denied by the Admin.**")
-            except: pass
-            bot.edit_message_text(f"❌ **Bulk Pack Denied!**\nStock array rolled back successfully for `{country}`.", chat_id=call.message.chat.id, message_id=call.message.message_id)
-            
-        del PENDING_PACKS[pack_id]
+        for u_id_str, info in users_data.items():
+            try:
+                bot.send_message(chat_id=int(u_id_str), text=broadcast_text, parse_mode='HTML')
+                success_count += 1
+            except:
+                pass
+                
+        bot.send_message(ADMIN_ID, f"✅ **ব্রডকাস্ট সম্পন্ন!**\n🎯 সফলভাবে {success_count} জন ইউজারের ইনবক্সে মেসেজ পাঠানো হয়েছে।")
     except Exception as e:
-        bot.send_message(ADMIN_ID, f"❌ Pack Approval Handler Core Exception: {e}")
+        bot.send_message(ADMIN_ID, f"❌ Broadcast Error: {e}")
 
-# --- ACTIVE STOCK MANAGER COMMANDS (/delete & Inline Hooks) ---
+# --- DELETE STOCK ---
 @bot.message_handler(commands=['delete'])
 def admin_delete_stock_menu(message):
     if message.from_user.id != ADMIN_ID: return
@@ -361,7 +380,7 @@ def admin_delete_stock_menu(message):
         for country in active_countries:
             markup.add(types.InlineKeyboardButton(f"🗑️ Delete {country} [{len(stock[country])} lines]", callback_data=f"adm_del_{country}"))
             
-        bot.send_message(message.chat.id, "🛠️ **Select a country stock to completely delete and stop inbox forwarding:**", reply_markup=markup)
+        bot.send_message(message.chat.id, "🛠️ **Select a country stock to completely delete:**", reply_markup=markup)
     except: pass
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('adm_del_'))
@@ -371,13 +390,10 @@ def handle_admin_stock_wipe(call):
         country_target = call.data.replace('adm_del_', '')
         
         db = load_db()
-        
-        # ১. স্টক থেকে ওই দেশের নম্বর রিমুভ করা
         numbers_in_stock = db["stock"].get(country_target, [])
         if country_target in db["stock"]:
             db["stock"][country_target] = []
             
-        # ২. ডাইনামিক প্রিফিক্স ডিটেকশন (যাতে কাস্টমারের অলরেডি নামানো ফাইলের ম্যাপিংও ডিলিট হয়)
         prefix_target = None
         if numbers_in_stock:
             first_num = re.sub(r'\D', '', str(numbers_in_stock[0]))
@@ -387,7 +403,6 @@ def handle_admin_stock_wipe(call):
                     prefix_target = pk
                     break
 
-        # ৩. ম্যাপিং তালিকা ক্লিন করা
         keys_to_clear = []
         for mapped_num in list(db.get("mapping", {}).keys()):
             clean_mapped = re.sub(r'\D', '', str(mapped_num))
@@ -402,11 +417,11 @@ def handle_admin_stock_wipe(call):
                 del db["mapping"][k]
                 
         save_db(db)
-        bot.answer_callback_query(call.id, f"🗑️ Stock & Mappings for {country_target} deleted!", show_alert=True)
-        bot.edit_message_text(f"✅ **Stock Successfully Deleted!**\n🌍 Name: `{country_target}`\n❌ SMS routing and dynamic files for this prefix has been disconnected safely.", chat_id=call.message.chat.id, message_id=call.message.message_id)
-    except Exception as e:
-        bot.send_message(ADMIN_ID, f"❌ Wipe runtime logic failure: {e}")
+        bot.answer_callback_query(call.id, f"🗑️ Stock & Mappings deleted!", show_alert=True)
+        bot.edit_message_text(f"✅ **Stock Successfully Deleted!**\n🌍 Name: `{country_target}`", chat_id=call.message.chat.id, message_id=call.message.message_id)
+    except: pass
 
+# --- OTHER MENUS ---
 @bot.message_handler(func=lambda m: m.text == "📊 Stock Status")
 def current_stock_status_msg(message):
     try:
@@ -493,10 +508,10 @@ def handle_withdraw_input(message):
         db["users"][str(u_id)]["balance"] = 0.0
         save_db(db)
         bot.send_message(message.chat.id, "⏳ **Withdraw request sent to Admin.**")
-        bot.send_message(ADMIN_ID, f"📥 **WITHDRAW REQUEST**\n\n👤 User: {message.from_user.first_name}\n🆔 ID: `{u_id}`\n💰 Amount: `{current_bal}` $\n📝 Details: `{details}`\n\nTo Pay: `/pay {u_id} TxID` or caption photo with `{u_id}`")
+        bot.send_message(ADMIN_ID, f"📥 **WITHDRAW REQUEST**\n\n👤 User: {message.from_user.first_name}\n🆔 ID: `{u_id}`\n💰 Amount: `{current_bal}` $\n📝 Details: `{details}`\n\nTo Pay:\n`/pay {u_id} TxID`")
     except: pass
 
-# --- DYNAMIC FILE IMPORT LOOP ---
+# --- FILE IMPORT ---
 @bot.message_handler(content_types=['document'])
 def handle_admin_txt_upload(message):
     if message.from_user.id != ADMIN_ID: return
@@ -512,9 +527,7 @@ def handle_admin_txt_upload(message):
             lines = content.strip().split('\n')
             cleaned_numbers = [re.sub(r'\D', '', l) for l in lines if re.sub(r'\D', '', l)]
             
-            if not cleaned_numbers:
-                bot.reply_to(message, "❌ File-e kono valid number paowa jayni!")
-                return
+            if not cleaned_numbers: return
                 
             db = load_db()
             if "stock" not in db: db["stock"] = {}
@@ -522,62 +535,34 @@ def handle_admin_txt_upload(message):
             
             db["stock"][c_name].extend(cleaned_numbers)
             save_db(db)
-            
-            bot.reply_to(message, f"✅ **STOCK LOADED BY FILE NAME!**\n🌍 Stock Allocated Name: `{c_name}`\n🔢 Total Added: `{len(cleaned_numbers)}` Numbers.\n\n💡 *Note: Remotely update commissions using `/setprice` for matching prefixes.*")
-    except Exception as e:
-        bot.reply_to(message, f"❌ Error loading file name stream: {e}")
+            bot.reply_to(message, f"✅ **STOCK LOADED BY FILE NAME!**\n🌍 Stock Allocated Name: `{c_name}`\n🔢 Total Added: `{len(cleaned_numbers)}` Numbers.")
+    except: pass
 
-# --- CUSTOM DYNAMIC SETPRICE LOOP ENGINE ---
-@bot.message_handler(commands=['setprice'])
-def admin_set_price_init(message):
-    if message.from_user.id != ADMIN_ID: return
-    p = bot.send_message(message.chat.id, "⚙️ **[SET PRICE PANEL]**\n\nEnter the target country code prefix (e.g., `263`, `257`, `880`):", reply_markup=types.ForceReply(selective=True))
-    bot.register_for_reply(p, admin_set_price_prefix_step)
-
-def admin_set_price_prefix_step(message):
-    prefix = re.sub(r'\D', '', message.text.strip())
-    if not prefix:
-        bot.reply_to(message, "❌ Invalid input. Prefix text must be numbers only.")
-        return
-    p = bot.send_message(message.chat.id, f"💰 **Prefix Code:** `+{prefix}`\n\nEnter the per-SMS payout commission rate (e.g., `0.012`):", reply_markup=types.ForceReply(selective=True))
-    bot.register_for_reply(p, lambda msg: admin_set_price_final_save(msg, prefix))
-
-def admin_set_price_final_save(message, prefix):
-    try:
-        price = float(message.text.strip())
-        db = load_db()
-        if "prices" not in db: db["prices"] = {}
-        
-        db["prices"][str(prefix)] = price
-        save_db(db)
-        bot.reply_to(message, f"✅ **Commissions Map Configured!**\n📍 Prefix Route: `+{prefix}`\n💵 Custom Share Rate: `{price}` $")
-    except:
-        bot.reply_to(message, "❌ Invalid value matrix format. Price parsing dropped.")
-
-# --- ADMIN AUXILIARY ACTIONS ---
+# --- FIXED /addbalance SYSTEM ---
 @bot.message_handler(commands=['addbalance'])
 def admin_add_balance(message):
     if message.from_user.id != ADMIN_ID: return
     try:
-        parts = message.text.split(' ')
-        if len(parts) < 3:
-            bot.reply_to(message, "💡 **Format:** `/addbalance USER_ID AMOUNT` \nExample: `/addbalance 6394277892 10`")
+        # রেগুলার এক্সপ্রেশন দিয়ে আইডি এবং ব্যালেন্স আলাদা করা
+        match = re.match(r'/addbalance\s+(\d+)\s+([\d.]+)', message.text.strip())
+        if not match:
+            bot.reply_to(message, "💡 **Format:** `/addbalance USER_ID AMOUNT` \nExample: `/addbalance 6394277892 10.5`")
             return
             
-        t_id = parts[1].strip()
-        amt = float(parts[2].strip())
+        t_id = match.group(1)
+        amt = float(match.group(2))
         
         db = load_db()
         if t_id in db["users"]:
             db["users"][t_id]["balance"] = round(db["users"][t_id]["balance"] + amt, 4)
             save_db(db)
-            bot.reply_to(message, f"✅ **Added successfully!**\n👤 User: `{t_id}`\n💵 New Wallet Balance: `{db['users'][t_id]['balance']}` $")
+            bot.reply_to(message, f"✅ **Added successfully!**\n👤 User: `{t_id}`\n💵 Balance: `{db['users'][t_id]['balance']}` $")
             try: bot.send_message(int(t_id), f"🎉 **Admin added `{amt}` $ to your balance.**")
             except: pass
         else:
-            bot.reply_to(message, "❌ User ID paowa jayni!")
+            bot.reply_to(message, f"❌ User ID `{t_id}` ডেটাবেজে পাওয়া যায়নি!")
     except Exception as e:
-        bot.reply_to(message, f"❌ Parsing Error: {e}")
+        bot.reply_to(message, f"❌ AddBalance Engine Error: {e}")
 
 @bot.message_handler(commands=['backup'])
 def admin_selective_backup(message):
@@ -585,36 +570,14 @@ def admin_selective_backup(message):
     try:
         db = load_db()
         users_data = db.get("users", {})
-        
-        report = "📊 CUSTOMER BALANCES & DAILY HISTORY REPORT BACKUP\n"
-        report += f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-        report += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        
+        report = "📊 CUSTOMER BALANCES & DAILY HISTORY REPORT BACKUP\n\n"
         for u_id, details in users_data.items():
-            username = details.get("username", "Unknown")
-            balance = details.get("balance", 0.0)
-            status = details.get("status", "pending")
-            history = details.get("history", {})
-            
-            report += f"👤 User: {username} (ID: {u_id}) | Status: [{status}]\n"
-            report += f"💰 Current Balance: {balance} $\n"
-            report += "📅 10 Days History Logs:\n"
-            
-            has_history = False
-            if isinstance(history, dict):
-                for date_str, metrics in history.items():
-                    report += f"   └── {date_str}: {metrics.get('count', 0)} OTPs | Earned: {metrics.get('earn', 0.0)} $\n"
-                    has_history = True
-            if not has_history:
-                report += "   └── No active daily history logged.\n"
+            report += f"👤 User: {details.get('username', 'Unknown')} (ID: {u_id})\n💰 Balance: {details.get('balance', 0.0)} $\n"
             report += "---------------------------------------------------------\n"
-            
         bio = io.BytesIO(report.encode('utf-8'))
-        bio.name = f"user_balances_history_backup_{datetime.now().strftime('%Y%m%d')}.txt"
-        
-        bot.send_document(ADMIN_ID, bio, caption="📦 **Clean Customer Report Backup Complete!**")
-    except Exception as e:
-        bot.reply_to(message, f"❌ Failed to parse clear backup: {e}")
+        bio.name = "backup.txt"
+        bot.send_document(ADMIN_ID, bio, caption="📦 **Backup Complete!**")
+    except: pass
 
 @bot.message_handler(commands=['allow', 'ban', 'unban'])
 def admin_status_management(message):
@@ -627,21 +590,24 @@ def admin_status_management(message):
             db["users"][t_id]["status"] = "allowed" if cmd in ['allow', 'unban'] else "banned"
             save_db(db)
             bot.reply_to(message, f"✅ Action Complete: {cmd}")
-            if cmd == 'allow':
-                try: bot.send_message(int(t_id), "🎉 **Your account has been approved by the Admin!**")
-                except: pass
     except: pass
 
+# --- WORK PERFECT /pay ---
 @bot.message_handler(commands=['pay'])
 def admin_pay_text(message):
     if message.from_user.id != ADMIN_ID: return
     try:
-        parts = message.text.split(' ', 2)
-        t_id, tx_id = parts[1].strip(), parts[2].strip()
+        match = re.match(r'/pay\s+(\d+)\s+(.+)', message.text.strip())
+        if not match:
+            bot.reply_to(message, "💡 **Format:** `/pay USER_ID TxID` \nExample: `/pay 6394277892 bkash-123456`")
+            return
+        t_id = match.group(1)
+        tx_id = match.group(2)
         user_msg = f"✅ **WITHDRAW PAID SUCCESSFUL**\n━━━━━━━━━━━━━━━━━━━━\n🔔 **Status:** PAID\n🆔 **TxID:** `{tx_id}`"
-        try: bot.send_message(int(t_id), user_msg, parse_mode='Markdown')
+        try: 
+            bot.send_message(int(t_id), user_msg, parse_mode='Markdown')
+            bot.reply_to(message, f"🚀 Withdraw Paid Successfully To `{t_id}`.")
         except: pass
-        bot.reply_to(message, "🚀 Dispatched.")
     except: pass
 
 @bot.message_handler(content_types=['photo'])
@@ -656,12 +622,14 @@ def admin_photo_payout(message):
             bot.reply_to(message, f"🚀 Sent to `{caption}`.")
     except: pass
 
-# --- INITIALIZER WRAPPERS ---
+# --- INITIALIZER POLLING RUNNER ---
 if __name__ == '__main__':
     load_db()
     t = threading.Thread(target=sms_forwarder_loop, daemon=True)
     t.start()
     
     while True:
-        try: bot.polling(none_stop=True, timeout=40, long_polling_timeout=20)
-        except: time.sleep(5)
+        try: 
+            bot.polling(none_stop=True, timeout=40, long_polling_timeout=20)
+        except: 
+            time.sleep(5)
