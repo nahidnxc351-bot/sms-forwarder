@@ -15,6 +15,7 @@ from datetime import datetime, timedelta
 # ==========================================
 ADMIN_ID = 6394277892
 DATA_FILE = 'bot_data.json'
+db_lock = threading.Lock()  # 🔒 রেলওয়ে ক্র্যাশ ফিক্সের জন্য থ্রেড লক
 
 # --- ১ নম্বর বট (কাস্টমার ইনবক্স ও ওটিপি বট) ---
 BOT_TOKEN_1 = '8632560684:AAFTRnXnAinthypH2Ja7U6kj0FyR4-5kpqo' 
@@ -33,24 +34,36 @@ PANEL_TOKEN_2 = 'RVRVSjRSQlp8ioJzZ3JXSHh_jl91VIKHSnZQYnyUa3hSmE-Ch4SS'
 bot2 = telebot.TeleBot(BOT_TOKEN_2, threaded=False)
 processed_sms_bot2 = set()
 
+# HTTP সেশন অপটিমাইজেশন (রেলওয়ে সার্ভারের জন্য নিরাপদ)
+session = requests.Session()
+
 # ==========================================
-# 💾 ডাটাবেজ ম্যানেজমেন্ট ফাংশনস
+# 💾 ডাটাবেজ ম্যানেজমেন্ট ফাংশনস (ক্র্যাশ প্রুফ লক সহ)
 # ==========================================
 def load_db():
-    try:
-        if os.path.exists(DATA_FILE):
-            with open(DATA_FILE, 'r') as f: return json.load(f)
-    except: pass
-    default_db = {"users": {}, "stock": {}, "mapping": {}, "prices": {}}
-    try:
-        with open(DATA_FILE, 'w') as f: json.dump(default_db, f, indent=4)
-    except: pass
-    return default_db
+    with db_lock:  # ফাইল লক নিশ্চিত করা হচ্ছে
+        try:
+            if os.path.exists(DATA_FILE):
+                with open(DATA_FILE, 'r') as f: 
+                    return json.load(f)
+        except Exception as e: 
+            print(f"⚠️ Read DB Error: {e}")
+        
+        default_db = {"users": {}, "stock": {}, "mapping": {}, "prices": {}}
+        try:
+            with open(DATA_FILE, 'w') as f: 
+                json.dump(default_db, f, indent=4)
+        except: 
+            pass
+        return default_db
 
 def save_db(data):
-    try:
-        with open(DATA_FILE, 'w') as f: json.dump(data, f, indent=4)
-    except: pass
+    with db_lock:  # ফাইল রাইট করার সময় লক করা হচ্ছে যাতে ডেটা করাপ্ট না হয়
+        try:
+            with open(DATA_FILE, 'w') as f: 
+                json.dump(data, f, indent=4)
+        except Exception as e:
+            print(f"⚠️ Save DB Error: {e}")
 
 def get_user(u_id, username="Unknown"):
     db = load_db()
@@ -76,13 +89,12 @@ def extract_otp(message):
     return "N/A"
 
 # ==========================================
-# 🚀 ফাংশন: ইউজার ম্যাপিং এবং ইনবক্স ডেলিভারি ইঞ্জিন (কোর ফিক্স)
+# 🚀 ফাংশন: ইউজার ম্যাপিং এবং ইনবক্স ডেলিভারি ইঞ্জিন
 # ==========================================
 def process_and_deliver_inbox(bot_instance, api_clean_num, num, otp_msg, raw_srv, code):
     db = load_db()
     target_uid = None
     
-    # ফাইলের কেনা নাম্বারের সাথে নিখুঁত ডিজিট ম্যাচিং লজিক
     for s_num, mapped_uid in list(db.get("mapping", {}).items()):
         db_clean_num = re.sub(r'\D', '', str(s_num))
         if (db_clean_num in api_clean_num) or (api_clean_num in db_clean_num) or (api_clean_num[-9:] == db_clean_num[-9:]):
@@ -126,7 +138,6 @@ def process_and_deliver_inbox(bot_instance, api_clean_num, num, otp_msg, raw_srv
                          f"🎁 **Commission:** `+{commission} $`")
             
             try: 
-                # মেইন বট (বট ১) দিয়ে সরাসরি কাস্টমারের ইনবক্সে ওটিপি ডেলিভারি করা হচ্ছে
                 sent_inbox = bot.send_message(int(target_uid), inbox_text, parse_mode='Markdown')
                 db["users"][target_uid]["last_pinned_msg_id"] = sent_inbox.message_id
             except Exception as inbox_err:
@@ -139,99 +150,92 @@ def process_and_deliver_inbox(bot_instance, api_clean_num, num, otp_msg, raw_srv
 # ==========================================
 def sms_forwarder_loop():
     global processed_sms
-    print("🚀 Bot 1 (Inbox Bot) Forwarder Loop Started...")
+    print("🚀 Bot 1 Forwarder Loop Started...")
     while True:
         try:
-            with requests.get(f"{API_URL_1}?token={PANEL_TOKEN_1}", timeout=15) as res:
-                if res.status_code == 200:
-                    data = res.json()
-                    if data.get('status') == 'success':
-                        sms_list = data.get('data', [])
+            res = session.get(f"{API_URL_1}?token={PANEL_TOKEN_1}", timeout=10)
+            if res.status_code == 200:
+                data = res.json()
+                if data.get('status') == 'success':
+                    sms_list = data.get('data', [])
+                    
+                    if len(processed_sms) > 2000:
+                        processed_sms.clear()
                         
-                        if len(processed_sms) > 3000:
-                            processed_sms.clear()
+                    for sms in reversed(sms_list):
+                        num = str(sms.get('num', '')).strip()
+                        msg_id = f"{num}_{sms.get('dt')}"
+                        
+                        if msg_id not in processed_sms:
+                            processed_sms.add(msg_id)
                             
-                        for sms in reversed(sms_list):
-                            num = str(sms.get('num', '')).strip()
-                            msg_id = f"{num}_{sms.get('dt')}"
+                            api_clean_num = re.sub(r'\D', '', num)
+                            otp_msg = sms.get('message', '')
+                            raw_srv = str(sms.get('cli', 'Unknown')).strip()
+                            code = extract_otp(otp_msg)
                             
-                            if msg_id not in processed_sms:
-                                processed_sms.add(msg_id)
-                                
-                                api_clean_num = re.sub(r'\D', '', num)
-                                otp_msg = sms.get('message', '')
-                                raw_srv = str(sms.get('cli', 'Unknown')).strip()
-                                code = extract_otp(otp_msg)
-                                
-                                # ১. গ্রুপে ওটিপি ফরোয়ার্ড
-                                group_text = (f"📩 **NEW SMS RECEIVED!**\n\n"
-                                             f"👤 **Number:** `{num}`\n"
-                                             f"🏢 **Service:** `{raw_srv[:2]}***`\n"
-                                             f"💬 **Message:** {otp_msg}\n"
-                                             f"🔑 **OTP:** `{code}`")
-                                try: bot.send_message(GROUP_ID_1, group_text, parse_mode='Markdown')
-                                except: pass
-                                
-                                # ২. ম্যাচ করলে ইনবক্সে ডেলিভারি করা
-                                process_and_deliver_inbox(bot, api_clean_num, num, otp_msg, raw_srv, code)
-                                
-            del data
-            gc.collect()
-            time.sleep(5)
+                            group_text = (f"📩 **NEW SMS RECEIVED!**\n\n"
+                                         f"👤 **Number:** `{num}`\n"
+                                         f"🏢 **Service:** `{raw_srv[:2]}***`\n"
+                                         f"💬 **Message:** {otp_msg}\n"
+                                         f"🔑 **OTP:** `{code}`")
+                            try: bot.send_message(GROUP_ID_1, group_text, parse_mode='Markdown')
+                            except: pass
+                            
+                            process_and_deliver_inbox(bot, api_clean_num, num, otp_msg, raw_srv, code)
+            time.sleep(4)
         except Exception as e:
+            print(f"⚠️ Loop 1 Exception Reset: {e}")
             time.sleep(5)
 
 # ==========================================
-# 🚀 রাস্তা ২: বট ২-এর নতুন ফরোয়ার্ডার লুপ (গ্রুপ + ইনবক্স ব্যাকআপ সাপোর্ট)
+# 🚀 রাস্তা ২: বট ২-এর নতুন ফরোয়ার্ডার লুপ
 # ==========================================
 def new_bot_sms_loop():
     global processed_sms_bot2
-    print("🚀 Bot 2 (New SMS Forwarder) Loop Started...")
+    print("🚀 Bot 2 Forwarder Loop Started...")
     while True:
         try:
-            with requests.get(f"{API_URL_2}?token={PANEL_TOKEN_2}&records=25", timeout=15) as res:
-                if res.status_code == 200:
-                    data = res.json()
-                    if data.get('status') == 'success':
-                        sms_list = data.get('data', [])
+            res = session.get(f"{API_URL_2}?token={PANEL_TOKEN_2}&records=25", timeout=10)
+            if res.status_code == 200:
+                data = res.json()
+                if data.get('status') == 'success':
+                    sms_list = data.get('data', [])
+                    
+                    if len(processed_sms_bot2) > 2000:
+                        processed_sms_bot2.clear()
                         
-                        if len(processed_sms_bot2) > 3000:
-                            processed_sms_bot2.clear()
+                    for sms in reversed(sms_list):
+                        num = str(sms.get('num', '')).strip()
+                        msg_id = f"{num}_{sms.get('dt')}"
+                        
+                        if msg_id not in processed_sms_bot2:
+                            processed_sms_bot2.add(msg_id)
                             
-                        for sms in reversed(sms_list):
-                            num = str(sms.get('num', '')).strip()
-                            msg_id = f"{num}_{sms.get('dt')}"
+                            api_clean_num = re.sub(r'\D', '', num)
+                            otp_msg = sms.get('message', '')
+                            service_name = sms.get('service') or sms.get('cli') or 'Unknown'
+                            service_name = str(service_name).strip()
+                            code = extract_otp(otp_msg)
                             
-                            if msg_id not in processed_sms_bot2:
-                                processed_sms_bot2.add(msg_id)
+                            group_text = (f"🎯 **NEW SMS RECEIVED!**\n\n"
+                                         f"👤 **Number:** `{num}`\n"
+                                         f"🏢 **Service:** `{service_name}`\n"
+                                         f"💬 **Message:** {otp_msg}\n"
+                                         f"🔑 **Code:** `{code}`")
+                            try:
+                                bot2.send_message(GROUP_ID_1, group_text, parse_mode='Markdown')
+                            except:
+                                pass
                                 
-                                api_clean_num = re.sub(r'\D', '', num)
-                                otp_msg = sms.get('message', '')
-                                service_name = sms.get('service') or sms.get('cli') or 'Unknown'
-                                service_name = str(service_name).strip()
-                                code = extract_otp(otp_msg)
-                                
-                                # ১. গ্রুপে ওটিপি ফরোয়ার্ড
-                                group_text = (f"🎯 **NEW SMS RECEIVED!**\n\n"
-                                             f"👤 **Number:** `{num}`\n"
-                                             f"🏢 **Service:** `{service_name}`\n"
-                                             f"💬 **Message:** {otp_msg}\n"
-                                             f"🔑 **Code:** `{code}`")
-                                try:
-                                    bot2.send_message(GROUP_ID_1, group_text, parse_mode='Markdown')
-                                except Exception as e:
-                                    print(f"Bot 2 Send Error: {e}")
-                                    
-                                # ২. বট ২-এর এপিআইতে আসা নাম্বারটিও কাস্টমারের ফাইলের সাথে চেক করে ইনবক্সে পাঠানো হচ্ছে!
-                                process_and_deliver_inbox(bot, api_clean_num, num, otp_msg, service_name, code)
-            del data
-            gc.collect()
-            time.sleep(5)
+                            process_and_deliver_inbox(bot, api_clean_num, num, otp_msg, service_name, code)
+            time.sleep(4)
         except Exception as e:
+            print(f"⚠️ Loop 2 Exception Reset: {e}")
             time.sleep(5)
 
 # ==========================================
-# ⌨️ কিবোর্ড বিল্ডার্স ও ইউজার হ্যান্ডলারস (বট ১)
+# ⌨️ কিবোর্ড বিল্ডার্স ও ইউজার হ্যান্ডলারস
 # ==========================================
 def main_menu():
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
@@ -406,28 +410,19 @@ def handle_admin_broadcast(message):
     try:
         broadcast_text = message.text.replace('/broadcast', '').strip()
         if not broadcast_text:
-            bot.reply_to(message, "❌ **ফরম্যাট ভুল!**\n\nকমান্ডের সাথে আপনার মেসেজটি লিখুন।\nযেমন: `/broadcast Burundi নতুন নাম্বার স্টক করা হয়েছে!`")
+            bot.reply_to(message, "❌ **ফরম্যাট ভুল!**\n\nকমান্ডের সাথে আপনার মেসেজটি লিখুন।")
             return
             
         db = load_db()
         users_data = db.get("users", {})
-        if not users_data:
-            bot.reply_to(message, "❌ বটের ডাটাবেজে কোনো ইউজার খুঁজে পাওয়া যায়নি।")
-            return
+        if not users_data: return
             
-        bot.reply_to(message, f"📢 {len(users_data)} জন ইউজারের ইনবক্সে নোтить পাঠানো প্রসেস শুরু হচ্ছে...")
-        success_count = 0
+        bot.reply_to(message, f"📢 {len(users_data)} জন ইউজারের ইনবক্সে ব্রডকাস্ট শুরু হচ্ছে...")
         
-        for u_id_str, info in users_data.items():
-            try:
-                bot.send_message(chat_id=int(u_id_str), text=broadcast_text, parse_mode='HTML')
-                success_count += 1
-            except:
-                pass
-                
-        bot.send_message(ADMIN_ID, f"✅ **ব্রডকাস্ট সম্পন্ন!**\n🎯 সফলভাবে {success_count} জন ইউজারের ইনবক্সে মেসেজ পাঠানো হয়েছে।")
-    except Exception as e:
-        bot.send_message(ADMIN_ID, f"❌ Broadcast Error: {e}")
+        for u_id_str in users_data.keys():
+            try: bot.send_message(chat_id=int(u_id_str), text=broadcast_text, parse_mode='HTML')
+            except: pass
+    except: pass
 
 @bot.message_handler(commands=['delete'])
 def admin_delete_stock_menu(message):
@@ -438,12 +433,12 @@ def admin_delete_stock_menu(message):
         active_countries = [c for c, nums in stock.items() if len(nums) > 0]
         
         if not active_countries:
-            bot.send_message(message.chat.id, "📂 **বর্তমানে ডাটাবেজে ডিলিট করার মতো কোনো একটিভ স্টক ফাইল নেই।**")
+            bot.send_message(message.chat.id, "📂 **বর্তমানে ডিলিট করার মতো কোনো একটিভ স্টক ফাইল নেই।**")
             return
             
         markup = types.InlineKeyboardMarkup()
         for country in active_countries:
-            markup.add(types.InlineKeyboardButton(f"🗑️ Delete {country} [{len(stock[country])} lines]", callback_data=f"adm_del_{country}"))
+            markup.add(types.InlineKeyboardButton(f"🗑️ Delete {country}", callback_data=f"adm_del_{country}"))
             
         bot.send_message(message.chat.id, "🛠️ **Select a country stock to completely delete:**", reply_markup=markup)
     except: pass
@@ -471,18 +466,15 @@ def handle_admin_stock_wipe(call):
         keys_to_clear = []
         for mapped_num in list(db.get("mapping", {}).keys()):
             clean_mapped = re.sub(r'\D', '', str(mapped_num))
-            
             if mapped_num in numbers_in_stock:
                 keys_to_clear.append(mapped_num)
             elif prefix_target and clean_mapped.startswith(prefix_target):
                 keys_to_clear.append(mapped_num)
                 
         for k in keys_to_clear:
-            if k in db["mapping"]:
-                del db["mapping"][k]
+            if k in db["mapping"]: del db["mapping"][k]
                 
         save_db(db)
-        bot.answer_callback_query(call.id, f"🗑️ Stock & Mappings deleted!", show_alert=True)
         bot.edit_message_text(f"✅ **Stock Successfully Deleted!**\n🌍 Name: `{country_target}`", chat_id=call.message.chat.id, message_id=call.message.message_id)
     except: pass
 
@@ -497,8 +489,7 @@ def current_stock_status_msg(message):
             if len(nums) > 0:
                 res += f"🌍 **{country}:** `{len(nums)}` numbers available\n"
                 has_stock = True
-        if not has_stock:
-            res = "❌ **দুঃখিত, বর্তমানে কোনো স্টক খালি নেই।**"
+        if not has_stock: res = "❌ **দুঃখিত, বর্তমানে কোনো স্টক খালি নেই।**"
         bot.send_message(message.chat.id, res, parse_mode='Markdown')
     except: pass
 
@@ -516,7 +507,7 @@ def check_history_msg(message):
         db = load_db()
         history_logs = db["users"].get(u_id, {}).get("history", {})
         
-        report_text = "📊 **YOUR 10 DAYS OTP & REVENUE REPORT**\n━━━━━━━━━━━━━━━━━━━━\n"
+        report_text = "📊 **YOUR 10 DAYS OTP REPORT**\n━━━━━━━━━━━━━━━━━━━━\n"
         total_otps, total_revenue = 0, 0.0
         has_records = False
         
@@ -531,10 +522,8 @@ def check_history_msg(message):
                     total_revenue += earn
                     has_records = True
                     
-        if not has_records:
-            report_text += "❌ No records found."
-        else:
-            report_text += f"━━━━━━━━━━━━━━━━━━━━\n✅ **Total OTPs:** `{total_otps}`\n💰 **Total Earned:** `{round(total_revenue, 4)}` $"
+        if not has_records: report_text += "❌ No records found."
+        else: report_text += f"━━━━━━━━━━━━━━━━━━━━\n✅ **Total OTPs:** `{total_otps}`\n💰 **Total Earned:** `{round(total_revenue, 4)}` $"
         bot.send_message(message.chat.id, report_text, parse_mode='Markdown')
     except: pass
 
@@ -547,7 +536,7 @@ def stats_msg(message):
             return
         res = "🌍 **YOUR OTP COUNTS:**\n━━━━━━━━━━━━━━━━━━━━\n"
         for cc, count in user["stats"].items():
-            res += f"📍 **Code +{cc}:** `{count}` successful verifications\n"
+            res += f"📍 **Code +{cc}:** `{count}` verifications\n"
         bot.send_message(message.chat.id, res, parse_mode='Markdown')
     except: pass
 
@@ -556,7 +545,7 @@ def withdraw_msg(message):
     try:
         user = get_user(message.from_user.id)
         if user["balance"] <= 0:
-            bot.send_message(message.chat.id, f"❌ **Insufficient balance to withdraw. Balance:** `{user['balance']}` $")
+            bot.send_message(message.chat.id, f"❌ **Insufficient balance. Balance:** `{user['balance']}` $")
             return
         p = bot.send_message(message.chat.id, "💸 **Withdraw Panel**\n\nReply directly with your bKash Number / Binance ID:", reply_markup=types.ForceReply(selective=True))
         bot.register_for_reply(p, handle_withdraw_input)
@@ -572,7 +561,7 @@ def handle_withdraw_input(message):
         db["users"][str(u_id)]["balance"] = 0.0
         save_db(db)
         bot.send_message(message.chat.id, "⏳ **Withdraw request sent to Admin.**")
-        bot.send_message(ADMIN_ID, f"📥 **WITHDRAW REQUEST**\n\n👤 User: {message.from_user.first_name}\n🆔 ID: `{u_id}`\n💰 Amount: `{current_bal}` $\n📝 Details: `{details}`\n\nTo Pay:\n`/pay {u_id} TxID`")
+        bot.send_message(ADMIN_ID, f"📥 **WITHDRAW REQUEST**\n\n👤 User: {message.from_user.first_name}\n🆔 ID: `{u_id}`\n💰 Amount: `{current_bal}` $\n📝 Details: `{details}`")
     except: pass
 
 @bot.message_handler(content_types=['document'])
@@ -589,7 +578,6 @@ def handle_admin_txt_upload(message):
             
             lines = content.strip().split('\n')
             cleaned_numbers = [re.sub(r'\D', '', l) for l in lines if re.sub(r'\D', '', l)]
-            
             if not cleaned_numbers: return
                 
             db = load_db()
@@ -598,7 +586,7 @@ def handle_admin_txt_upload(message):
             
             db["stock"][c_name].extend(cleaned_numbers)
             save_db(db)
-            bot.reply_to(message, f"✅ **STOCK LOADED BY FILE NAME!**\n🌍 Stock Allocated Name: `{c_name}`\n🔢 Total Added: `{len(cleaned_numbers)}` Numbers.")
+            bot.reply_to(message, f"✅ **STOCK LOADED!**\n🌍 Stock Allocated Name: `{c_name}`\n🔢 Total Added: `{len(cleaned_numbers)}` Numbers.")
     except: pass
 
 @bot.message_handler(commands=['addbalance'])
@@ -606,38 +594,14 @@ def admin_add_balance(message):
     if message.from_user.id != ADMIN_ID: return
     try:
         match = re.match(r'/addbalance\s+(\d+)\s+([\d.]+)', message.text.strip())
-        if not match:
-            bot.reply_to(message, "💡 **Format:** `/addbalance USER_ID AMOUNT` \nExample: `/addbalance 6394277892 10.5`")
-            return
-            
-        t_id = match.group(1)
-        amt = float(match.group(2))
+        if not match: return
+        t_id, amt = match.group(1), float(match.group(2))
         
         db = load_db()
         if t_id in db["users"]:
             db["users"][t_id]["balance"] = round(db["users"][t_id]["balance"] + amt, 4)
             save_db(db)
-            bot.reply_to(message, f"✅ **Added successfully!**\n👤 User: `{t_id}`\n💵 Balance: `{db['users'][t_id]['balance']}` $")
-            try: bot.send_message(int(t_id), f"🎉 **Admin added `{amt}` $ to your balance.**")
-            except: pass
-        else:
-            bot.reply_to(message, f"❌ User ID `{t_id}` ডেটাবেজে পাওয়া যায়নি!")
-    except Exception as e:
-        bot.reply_to(message, f"❌ AddBalance Engine Error: {e}")
-
-@bot.message_handler(commands=['backup'])
-def admin_selective_backup(message):
-    if message.from_user.id != ADMIN_ID: return
-    try:
-        db = load_db()
-        users_data = db.get("users", {})
-        report = "📊 CUSTOMER BALANCES & DAILY HISTORY REPORT BACKUP\n\n"
-        for u_id, details in users_data.items():
-            report += f"👤 User: {details.get('username', 'Unknown')} (ID: {u_id})\n💰 Balance: {details.get('balance', 0.0)} $\n"
-            report += "---------------------------------------------------------\n"
-        bio = io.BytesIO(report.encode('utf-8'))
-        bio.name = "backup.txt"
-        bot.send_document(ADMIN_ID, bio, caption="📦 **Backup Complete!**")
+            bot.reply_to(message, f"✅ **Balance Added!** Payout: `{db['users'][t_id]['balance']}` $")
     except: pass
 
 @bot.message_handler(commands=['allow', 'ban', 'unban'])
@@ -653,36 +617,6 @@ def admin_status_management(message):
             bot.reply_to(message, f"✅ Action Complete: {cmd}")
     except: pass
 
-@bot.message_handler(commands=['pay'])
-def admin_pay_text(message):
-    if message.from_user.id != ADMIN_ID: return
-    try:
-        match = re.match(r'/pay\s+(\d+)\s+(.+)', message.text.strip())
-        if not match:
-            bot.reply_to(message, "💡 **Format:** `/pay USER_ID TxID` \nExample: `/pay 6394277892 bkash-123456`")
-            return
-        t_id = match.group(1)
-        tx_id = match.group(2)
-        user_msg = f"✅ **WITHDRAW PAID SUCCESSFUL**\n━━━━━━━━━━━━━━━━━━━━\n🔔 **Status:** PAID\n🆔 **TxID:** `{tx_id}`"
-        try: 
-            bot.send_message(int(t_id), user_msg, parse_mode='Markdown')
-            bot.reply_to(message, f"🚀 Withdraw Paid Successfully To `{t_id}`.")
-        except: pass
-    except: pass
-
-@bot.message_handler(commands=['pay'])
-@bot.message_handler(content_types=['photo'])
-def admin_photo_payout(message):
-    if message.from_user.id != ADMIN_ID: return
-    try:
-        caption = message.caption.strip() if message.caption else None
-        if caption and caption.isdigit():
-            user_msg = "✅ **WITHDRAW PAID SUCCESSFUL**\n━━━━━━━━━━━━━━━━━━━━\n📸 **Payment Proof Screenshot:**"
-            try: bot.send_photo(int(caption), message.photo[-1].file_id, caption=user_msg, parse_mode='Markdown')
-            except: pass
-            bot.reply_to(message, f"🚀 Sent to `{caption}`.")
-    except: pass
-
 # ==========================================
 # ⚙️ মেইন রানার এবং মাল্টিথ্রেডিং কন্ট্রোলার
 # ==========================================
@@ -695,10 +629,12 @@ if __name__ == '__main__':
     t2 = threading.Thread(target=new_bot_sms_loop, daemon=True)
     t2.start()
     
-    print("🤖 দুটি বটই ব্যাকগ্রাউন্ডে চালু হয়েছে এবং ডুপ্লিকেট ইনবক্স লজিক পুরোপুরি ফিক্স করা হয়েছে।")
+    print("🤖 রেলওয়ে প্রোটেক্টেড মাল্টি-থ্রেড মোড চালু হয়েছে।")
     
+    # পোলিং ক্র্যাশ রিকভারি লুপ (Anti-Crash Engine)
     while True:
         try: 
-            bot.polling(none_stop=True, timeout=40, long_polling_timeout=20)
-        except: 
+            bot.polling(none_stop=True, timeout=60, long_polling_timeout=30)
+        except Exception as ex: 
+            print(f"⚠️ Polling Engine Restating due to connection drop... {ex}")
             time.sleep(5)
