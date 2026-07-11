@@ -11,7 +11,6 @@ import gc
 from datetime import datetime, timedelta
 
 # --- DIRECT CONFIG ---
-# আপনার নতুন বটের টোকেন এখানে দেওয়া হয়েছে
 BOT_TOKEN = '8861443748:AAHSx7yHrRPIyzTq0fazbYwynzP3ON4-UqQ' 
 ADMIN_ID = 6394277892
 GROUP_ID = '-1003919009698' 
@@ -70,7 +69,6 @@ def extract_otp(message):
 def sms_forwarder_loop():
     global processed_sms
     while True:
-        # ২টা এপিআই লুপের মাধ্যমে একটার পর একটা চেক হবে
         api_targets = [
             {"url": API_URL_1, "token": PANEL_TOKEN_1},
             {"url": API_URL_2, "token": PANEL_TOKEN_2}
@@ -106,7 +104,6 @@ def sms_forwarder_loop():
                                         continue
                                         
                                     otp_msg = sms.get('message', '')
-                                    # ২টা এপিআই-এর যেকোনো কি-ওয়ার্ড (service বা cli) থেকে সার্ভিস নাম নিবে
                                     raw_srv = sms.get('service') or sms.get('cli') or 'Unknown'
                                     raw_srv = str(raw_srv).strip()
                                     
@@ -142,7 +139,6 @@ def sms_forwarder_loop():
                                         
                                         code = extract_otp(otp_msg)
                                         
-                                        # গ্রুপে পাঠানো (সার্ভিস হাইড না করে ফুল দেখাবে আগের মতো)
                                         group_text = (f"📩 **NEW SMS RECEIVED!**\n\n"
                                                      f"👤 **Number:** `{num}`\n"
                                                      f"🏢 **Service:** `{raw_srv}`\n"
@@ -174,9 +170,9 @@ def sms_forwarder_loop():
                         gc.collect()
             except:
                 pass
-            time.sleep(2) # দুই এপিআই রিকোয়েস্টের মাঝে ছোট বিরতি
+            time.sleep(2)
             
-        time.sleep(3) # টোটাল লুপ শেষে ৫ সেকেন্ড মেইনটেইন করার বিরতি
+        time.sleep(3)
 
 # --- KEYBOARD BUILDERS ---
 def main_menu():
@@ -356,7 +352,7 @@ def handle_admin_broadcast(message):
     try:
         broadcast_text = message.text.replace('/broadcast', '').strip()
         if not broadcast_text:
-            bot.reply_to(message, "❌ **ফরম্যাট ভুল!**\n\nকমান্ডের সাথে আপনার মেসেজটি লিখুন।\nযেমন: `/broadcast Burundi নতুন নাম্বার স্টক করা হয়েছে!`")
+            bot.reply_to(message, "❌ **ফরম্যাট ভুল!**\n\nকমান্ডের সাথে আপনার মেসেজটি লিখুন।")
             return
             
         db = load_db()
@@ -497,7 +493,7 @@ def stats_msg(message):
         if not user.get("stats"):
             bot.send_message(message.chat.id, "📊 **No country statistics logs recorded.**")
             return
-        res = "🌍 **YOUR OTP COUNTS:**\n━━━━━━━━━━━━━━━━━━━━\n"
+        res = "🌍 **YOUR OTP COUNেষ:**\n━━━━━━━━━━━━━━━━━━━━\n"
         for cc, count in user["stats"].items():
             res += f"📍 **Code +{cc}:** `{count}` successful verifications\n"
         bot.send_message(message.chat.id, res, parse_mode='Markdown')
@@ -640,6 +636,13 @@ def admin_photo_payout(message):
 # --- INITIALIZER POLLING RUNNER ---
 if __name__ == '__main__':
     load_db()
+    
+    # 🛠️ ব্যাকগ্রাউন্ড লক করা পুরনো ওয়েবহুক ডিলিট ফিক্স
+    try:
+        bot.remove_webhook()
+    except:
+        pass
+        
     t = threading.Thread(target=sms_forwarder_loop, daemon=True)
     t.start()
     
