@@ -1,6 +1,8 @@
 import telebot
 from telebot import types
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util import Retry
 import time
 import os
 import json
@@ -34,14 +36,17 @@ PANEL_TOKEN_2 = 'RVRVSjRSQlp8ioJzZ3JXSHh_jl91VIKHSnZQYnyUa3hSmE-Ch4SS'
 bot2 = telebot.TeleBot(BOT_TOKEN_2, threaded=False)
 processed_sms_bot2 = set()
 
-# HTTP সেশন অপটিমাইজেশন (রেলওয়ে সার্ভারের জন্য নিরাপদ)
+# HTTP সেশন অপটিমাইজেশন (রেলওয়ে মাল্টি-থ্রেডিং এর জন্য কানেকশন পুল বৃদ্ধি)
 session = requests.Session()
+adapter = HTTPAdapter(pool_connections=100, pool_maxsize=100, max_retries=3)
+session.mount('http://', adapter)
+session.mount('https://', adapter)
 
 # ==========================================
 # 💾 ডাটাবেজ ম্যানেজমেন্ট ফাংশনস (ক্র্যাশ প্রুফ লক সহ)
 # ==========================================
 def load_db():
-    with db_lock:  # ফাইল লক নিশ্চিত করা হচ্ছে
+    with db_lock:
         try:
             if os.path.exists(DATA_FILE):
                 with open(DATA_FILE, 'r') as f: 
@@ -58,7 +63,7 @@ def load_db():
         return default_db
 
 def save_db(data):
-    with db_lock:  # ফাইল রাইট করার সময় লক করা হচ্ছে যাতে ডেটা করাপ্ট না হয়
+    with db_lock:
         try:
             with open(DATA_FILE, 'w') as f: 
                 json.dump(data, f, indent=4)
@@ -92,58 +97,61 @@ def extract_otp(message):
 # 🚀 ফাংশন: ইউজার ম্যাপিং এবং ইনবক্স ডেলিভারি ইঞ্জিন
 # ==========================================
 def process_and_deliver_inbox(bot_instance, api_clean_num, num, otp_msg, raw_srv, code):
-    db = load_db()
-    target_uid = None
-    
-    for s_num, mapped_uid in list(db.get("mapping", {}).items()):
-        db_clean_num = re.sub(r'\D', '', str(s_num))
-        if (db_clean_num in api_clean_num) or (api_clean_num in db_clean_num) or (api_clean_num[-9:] == db_clean_num[-9:]):
-            target_uid = str(mapped_uid)
-            break
-            
-    if target_uid:
-        c_code = "Unknown"
-        price_keys = sorted(list(db.get("prices", {}).keys()), key=len, reverse=True)
-        for pk in price_keys:
-            if api_clean_num.startswith(pk):
-                c_code = pk
+    try:
+        db = load_db()
+        target_uid = None
+        
+        for s_num, mapped_uid in list(db.get("mapping", {}).items()):
+            db_clean_num = re.sub(r'\D', '', str(s_num))
+            if (db_clean_num in api_clean_num) or (api_clean_num in db_clean_num) or (api_clean_num[-9:] == db_clean_num[-9:]):
+                target_uid = str(mapped_uid)
                 break
                 
-        commission = float(db.get("prices", {}).get(c_code, 0.0))
-        
-        if target_uid in db["users"]:
-            if db["users"][target_uid].get("status") != 'allowed':
-                return
+        if target_uid:
+            c_code = "Unknown"
+            price_keys = sorted(list(db.get("prices", {}).keys()), key=len, reverse=True)
+            for pk in price_keys:
+                if api_clean_num.startswith(pk):
+                    c_code = pk
+                    break
+                    
+            commission = float(db.get("prices", {}).get(c_code, 0.0))
+            
+            if target_uid in db["users"]:
+                if db["users"][target_uid].get("status") != 'allowed':
+                    return
+                    
+                today = datetime.now().strftime('%Y-%m-%d')
+                db["users"][target_uid]["balance"] = round(float(db["users"][target_uid].get("balance", 0.0)) + commission, 4)
                 
-            today = datetime.now().strftime('%Y-%m-%d')
-            db["users"][target_uid]["balance"] = round(float(db["users"][target_uid].get("balance", 0.0)) + commission, 4)
-            
-            if "stats" not in db["users"][target_uid]: db["users"][target_uid]["stats"] = {}
-            db["users"][target_uid]["stats"][c_code] = db["users"][target_uid]["stats"].get(c_code, 0) + 1
-            
-            if "history" not in db["users"][target_uid] or isinstance(db["users"][target_uid]["history"], list):
-                db["users"][target_uid]["history"] = {}
+                if "stats" not in db["users"][target_uid]: db["users"][target_uid]["stats"] = {}
+                db["users"][target_uid]["stats"][c_code] = db["users"][target_uid]["stats"].get(c_code, 0) + 1
                 
-            if today not in db["users"][target_uid]["history"]:
-                db["users"][target_uid]["history"][today] = {"count": 0, "earn": 0.0}
+                if "history" not in db["users"][target_uid] or isinstance(db["users"][target_uid]["history"], list):
+                    db["users"][target_uid]["history"] = {}
+                    
+                if today not in db["users"][target_uid]["history"]:
+                    db["users"][target_uid]["history"][today] = {"count": 0, "earn": 0.0}
+                    
+                db["users"][target_uid]["history"][today]["count"] += 1
+                db["users"][target_uid]["history"][today]["earn"] = round(float(db["users"][target_uid].get("history"][today].get("earn", 0.0)) + commission, 4)
                 
-            db["users"][target_uid]["history"][today]["count"] += 1
-            db["users"][target_uid]["history"][today]["earn"] = round(float(db["users"][target_uid].get("history"][today].get("earn", 0.0)) + commission, 4)
-            
-            inbox_text = (f"🎯 **SMS RECEIVED IN YOUR NUMBER!**\n\n"
-                         f"👤 **Number:** `{num}`\n"
-                         f"🏢 **Service:** `{raw_srv}`\n"
-                         f"💬 **Message:** {otp_msg}\n"
-                         f"🔑 **Code:** `{code}`\n"
-                         f"🎁 **Commission:** `+{commission} $`")
-            
-            try: 
-                sent_inbox = bot.send_message(int(target_uid), inbox_text, parse_mode='Markdown')
-                db["users"][target_uid]["last_pinned_msg_id"] = sent_inbox.message_id
-            except Exception as inbox_err:
-                print(f"❌ Inbox Send Failed to {target_uid}: {inbox_err}")
-            
-            save_db(db)
+                inbox_text = (f"🎯 **SMS RECEIVED IN YOUR NUMBER!**\n\n"
+                             f"👤 **Number:** `{num}`\n"
+                             f"🏢 **Service:** `{raw_srv}`\n"
+                             f"💬 **Message:** {otp_msg}\n"
+                             f"🔑 **Code:** `{code}`\n"
+                             f"🎁 **Commission:** `+{commission} $`")
+                
+                try: 
+                    sent_inbox = bot_instance.send_message(int(target_uid), inbox_text, parse_mode='Markdown')
+                    db["users"][target_uid]["last_pinned_msg_id"] = sent_inbox.message_id
+                except Exception as inbox_err:
+                    print(f"❌ Inbox Send Failed to {target_uid}: {inbox_err}")
+                
+                save_db(db)
+    except Exception as e:
+        print(f"⚠️ Delivery Engine Error: {e}")
 
 # ==========================================
 # 🚀 রাস্তা ১: বট ১-এর মেইন ফরোয়ার্ডার লুপ
@@ -153,7 +161,7 @@ def sms_forwarder_loop():
     print("🚀 Bot 1 Forwarder Loop Started...")
     while True:
         try:
-            res = session.get(f"{API_URL_1}?token={PANEL_TOKEN_1}", timeout=10)
+            res = session.get(f"{API_URL_1}?token={PANEL_TOKEN_1}", timeout=15)
             if res.status_code == 200:
                 data = res.json()
                 if data.get('status') == 'success':
@@ -196,7 +204,7 @@ def new_bot_sms_loop():
     print("🚀 Bot 2 Forwarder Loop Started...")
     while True:
         try:
-            res = session.get(f"{API_URL_2}?token={PANEL_TOKEN_2}&records=25", timeout=10)
+            res = session.get(f"{API_URL_2}?token={PANEL_TOKEN_2}&records=25", timeout=15)
             if res.status_code == 200:
                 data = res.json()
                 if data.get('status') == 'success':
@@ -225,9 +233,10 @@ def new_bot_sms_loop():
                                          f"🔑 **Code:** `{code}`")
                             try:
                                 bot2.send_message(GROUP_ID_1, group_text, parse_mode='Markdown')
-                            except:
-                                pass
+                            except Exception as b2e:
+                                print(f"⚠️ Bot2 Send Failed: {b2e}")
                                 
+                            # এখানে মেইন 'bot' কে ব্যবহার করা হচ্ছে ইউজারদের মেসেজ দিতে যাতে বটের পোলিং কনফ্লিক্ট না হয়
                             process_and_deliver_inbox(bot, api_clean_num, num, otp_msg, service_name, code)
             time.sleep(4)
         except Exception as e:
@@ -623,6 +632,7 @@ def admin_status_management(message):
 if __name__ == '__main__':
     load_db()
     
+    # ব্যাকগ্রাউন্ড ফরোয়ার্ডার লুপ রান করা হচ্ছে থ্রেডে
     t1 = threading.Thread(target=sms_forwarder_loop, daemon=True)
     t1.start()
     
@@ -631,7 +641,7 @@ if __name__ == '__main__':
     
     print("🤖 রেলওয়ে প্রোটেক্টেড মাল্টি-থ্রেড মোড চালু হয়েছে।")
     
-    # পোলিং ক্র্যাশ রিকভারি লুপ (Anti-Crash Engine)
+    # শুধুমাত্র প্রধান বটটির জন্য পোলিং ক্র্যাশ রিকভারি লুপ (Anti-Crash Engine) সচল রাখা হয়েছে
     while True:
         try: 
             bot.polling(none_stop=True, timeout=60, long_polling_timeout=30)
