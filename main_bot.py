@@ -25,7 +25,7 @@ API_URL_1 = 'http://51.77.216.195/crapi/konek/viewstats'
 bot = telebot.TeleBot(BOT_TOKEN_1, threaded=False)
 processed_sms = set()
 
-# --- ২ নম্বর নতুন বট (শুধু গ্রুপে এসএমএস ফরোয়ার্ডার) ---
+# --- ২ নম্বর নতুন বট (গ্রুপ এসএমএস ফরোয়ার্ডার + ইনবক্স ব্যাকআপ) ---
 BOT_TOKEN_2 = '8861443748:AAHSx7yHrRPIyzTq0fazbYwynzP3ON4-UqQ'
 API_URL_2 = 'http://147.135.212.197/crapi/had/viewstats'
 PANEL_TOKEN_2 = 'RVRVSjRSQlp8ioJzZ3JXSHh_jl91VIKHSnZQYnyUa3hSmE-Ch4SS'
@@ -76,7 +76,66 @@ def extract_otp(message):
     return "N/A"
 
 # ==========================================
-# 🚀 রাস্তা ১: বট ১-এর মেইন ফরোয়ার্ডার লুপ (গ্রুপ + কাস্টমার ইনবক্স ম্যাচিং)
+# 🚀 ফাংশন: ইউজার ম্যাপিং এবং ইনবক্স ডেলিভারি ইঞ্জিন (কোর ফিক্স)
+# ==========================================
+def process_and_deliver_inbox(bot_instance, api_clean_num, num, otp_msg, raw_srv, code):
+    db = load_db()
+    target_uid = None
+    
+    # ফাইলের কেনা নাম্বারের সাথে নিখুঁত ডিজিট ম্যাচিং লজিক
+    for s_num, mapped_uid in list(db.get("mapping", {}).items()):
+        db_clean_num = re.sub(r'\D', '', str(s_num))
+        if (db_clean_num in api_clean_num) or (api_clean_num in db_clean_num) or (api_clean_num[-9:] == db_clean_num[-9:]):
+            target_uid = str(mapped_uid)
+            break
+            
+    if target_uid:
+        c_code = "Unknown"
+        price_keys = sorted(list(db.get("prices", {}).keys()), key=len, reverse=True)
+        for pk in price_keys:
+            if api_clean_num.startswith(pk):
+                c_code = pk
+                break
+                
+        commission = float(db.get("prices", {}).get(c_code, 0.0))
+        
+        if target_uid in db["users"]:
+            if db["users"][target_uid].get("status") != 'allowed':
+                return
+                
+            today = datetime.now().strftime('%Y-%m-%d')
+            db["users"][target_uid]["balance"] = round(float(db["users"][target_uid].get("balance", 0.0)) + commission, 4)
+            
+            if "stats" not in db["users"][target_uid]: db["users"][target_uid]["stats"] = {}
+            db["users"][target_uid]["stats"][c_code] = db["users"][target_uid]["stats"].get(c_code, 0) + 1
+            
+            if "history" not in db["users"][target_uid] or isinstance(db["users"][target_uid]["history"], list):
+                db["users"][target_uid]["history"] = {}
+                
+            if today not in db["users"][target_uid]["history"]:
+                db["users"][target_uid]["history"][today] = {"count": 0, "earn": 0.0}
+                
+            db["users"][target_uid]["history"][today]["count"] += 1
+            db["users"][target_uid]["history"][today]["earn"] = round(float(db["users"][target_uid].get("history"][today].get("earn", 0.0)) + commission, 4)
+            
+            inbox_text = (f"🎯 **SMS RECEIVED IN YOUR NUMBER!**\n\n"
+                         f"👤 **Number:** `{num}`\n"
+                         f"🏢 **Service:** `{raw_srv}`\n"
+                         f"💬 **Message:** {otp_msg}\n"
+                         f"🔑 **Code:** `{code}`\n"
+                         f"🎁 **Commission:** `+{commission} $`")
+            
+            try: 
+                # মেইন বট (বট ১) দিয়ে সরাসরি কাস্টমারের ইনবক্সে ওটিপি ডেলিভারি করা হচ্ছে
+                sent_inbox = bot.send_message(int(target_uid), inbox_text, parse_mode='Markdown')
+                db["users"][target_uid]["last_pinned_msg_id"] = sent_inbox.message_id
+            except Exception as inbox_err:
+                print(f"❌ Inbox Send Failed to {target_uid}: {inbox_err}")
+            
+            save_db(db)
+
+# ==========================================
+# 🚀 রাস্তা ১: বট ১-এর মেইন ফরোয়ার্ডার লুপ
 # ==========================================
 def sms_forwarder_loop():
     global processed_sms
@@ -99,25 +158,12 @@ def sms_forwarder_loop():
                             if msg_id not in processed_sms:
                                 processed_sms.add(msg_id)
                                 
-                                # এপিআই থেকে আসা নাম্বার ক্লিন করা হচ্ছে (শুধু সংখ্যা রাখা হচ্ছে)
                                 api_clean_num = re.sub(r'\D', '', num)
-                                
-                                db = load_db()
-                                target_uid = None
-                                
-                                # 🔍 [সুপার ফিক্সড লজিক]: ফাইল কেনা নাম্বারের সাথে এপিআই নাম্বারের নিখুঁত ম্যাচিং
-                                for s_num, mapped_uid in list(db.get("mapping", {}).items()):
-                                    db_clean_num = re.sub(r'\D', '', str(s_num))
-                                    # শেষের ৮-১০ ডিজিট মিললেও যাতে ম্যাচ করে, প্লাস চিহ্নের ঝামেলা এড়াতে
-                                    if (db_clean_num in api_clean_num) or (api_clean_num in db_clean_num) or (api_clean_num[-9:] == db_clean_num[-9:]):
-                                        target_uid = str(mapped_uid)
-                                        break
-                                
                                 otp_msg = sms.get('message', '')
                                 raw_srv = str(sms.get('cli', 'Unknown')).strip()
                                 code = extract_otp(otp_msg)
                                 
-                                # 📢 ১. গ্রুপে মেসেজ পাঠানো (এটি সবসময় যাবে)
+                                # ১. গ্রুপে ওটিপি ফরোয়ার্ড
                                 group_text = (f"📩 **NEW SMS RECEIVED!**\n\n"
                                              f"👤 **Number:** `{num}`\n"
                                              f"🏢 **Service:** `{raw_srv[:2]}***`\n"
@@ -126,50 +172,9 @@ def sms_forwarder_loop():
                                 try: bot.send_message(GROUP_ID_1, group_text, parse_mode='Markdown')
                                 except: pass
                                 
-                                # 🎯 ২. ফাইল কেনা কাস্টমারের ইনবক্সে মেসেজ পাঠানো
-                                if target_uid:
-                                    c_code = "Unknown"
-                                    price_keys = sorted(list(db.get("prices", {}).keys()), key=len, reverse=True)
-                                    for pk in price_keys:
-                                        if api_clean_num.startswith(pk):
-                                            c_code = pk
-                                            break
-                                            
-                                    commission = float(db.get("prices", {}).get(c_code, 0.0))
-                                    
-                                    if target_uid in db["users"]:
-                                        if db["users"][target_uid].get("status") != 'allowed':
-                                            continue
-                                            
-                                        today = datetime.now().strftime('%Y-%m-%d')
-                                        db["users"][target_uid]["balance"] = round(float(db["users"][target_uid].get("balance", 0.0)) + commission, 4)
-                                        
-                                        if "stats" not in db["users"][target_uid]: db["users"][target_uid]["stats"] = {}
-                                        db["users"][target_uid]["stats"][c_code] = db["users"][target_uid]["stats"].get(c_code, 0) + 1
-                                        
-                                        if "history" not in db["users"][target_uid] or isinstance(db["users"][target_uid]["history"], list):
-                                            db["users"][target_uid]["history"] = {}
-                                            
-                                        if today not in db["users"][target_uid]["history"]:
-                                            db["users"][target_uid]["history"][today] = {"count": 0, "earn": 0.0}
-                                            
-                                        db["users"][target_uid]["history"][today]["count"] += 1
-                                        db["users"][target_uid]["history"][today]["earn"] = round(float(db["users"][target_uid]["history"][today].get("earn", 0.0)) + commission, 4)
-                                        
-                                        inbox_text = (f"🎯 **SMS RECEIVED IN YOUR NUMBER!**\n\n"
-                                                     f"👤 **Number:** `{num}`\n"
-                                                     f"🏢 **Service:** `{raw_srv}`\n"
-                                                     f"💬 **Message:** {otp_msg}\n"
-                                                     f"🔑 **Code:** `{code}`\n"
-                                                     f"🎁 **Commission:** `+{commission} $`")
-                                        
-                                        try: 
-                                            sent_inbox = bot.send_message(int(target_uid), inbox_text, parse_mode='Markdown')
-                                            db["users"][target_uid]["last_pinned_msg_id"] = sent_inbox.message_id
-                                        except Exception as inbox_err:
-                                            print(f"❌ Inbox Send Failed to {target_uid}: {inbox_err}")
-                                        
-                                        save_db(db)
+                                # ২. ম্যাচ করলে ইনবক্সে ডেলিভারি করা
+                                process_and_deliver_inbox(bot, api_clean_num, num, otp_msg, raw_srv, code)
+                                
             del data
             gc.collect()
             time.sleep(5)
@@ -177,7 +182,7 @@ def sms_forwarder_loop():
             time.sleep(5)
 
 # ==========================================
-# 🚀 রাস্তা ২: বট ২-এর নতুন ফরোয়ার্ডার লুপ (গ্রুপ এসএমএস)
+# 🚀 রাস্তা ২: বট ২-এর নতুন ফরোয়ার্ডার লুপ (গ্রুপ + ইনবক্স ব্যাকআপ সাপোর্ট)
 # ==========================================
 def new_bot_sms_loop():
     global processed_sms_bot2
@@ -200,21 +205,25 @@ def new_bot_sms_loop():
                             if msg_id not in processed_sms_bot2:
                                 processed_sms_bot2.add(msg_id)
                                 
+                                api_clean_num = re.sub(r'\D', '', num)
                                 otp_msg = sms.get('message', '')
                                 service_name = sms.get('service') or sms.get('cli') or 'Unknown'
                                 service_name = str(service_name).strip()
                                 code = extract_otp(otp_msg)
                                 
+                                # ১. গ্রুপে ওটিপি ফরোয়ার্ড
                                 group_text = (f"🎯 **NEW SMS RECEIVED!**\n\n"
                                              f"👤 **Number:** `{num}`\n"
                                              f"🏢 **Service:** `{service_name}`\n"
                                              f"💬 **Message:** {otp_msg}\n"
                                              f"🔑 **Code:** `{code}`")
-                                
                                 try:
                                     bot2.send_message(GROUP_ID_1, group_text, parse_mode='Markdown')
                                 except Exception as e:
                                     print(f"Bot 2 Send Error: {e}")
+                                    
+                                # ২. বট ২-এর এপিআইতে আসা নাম্বারটিও কাস্টমারের ফাইলের সাথে চেক করে ইনবক্সে পাঠানো হচ্ছে!
+                                process_and_deliver_inbox(bot, api_clean_num, num, otp_msg, service_name, code)
             del data
             gc.collect()
             time.sleep(5)
@@ -327,7 +336,6 @@ def deliver_file_callback(call):
         db["stock"][country] = db["stock"][country][count:]
         
         for num in selected:
-            # নাম্বারটি ডাটাবেজে ম্যাপ করা হচ্ছে ইউজারের সাথে
             db["mapping"][str(num)] = u_id
         save_db(db)
         
@@ -580,7 +588,6 @@ def handle_admin_txt_upload(message):
             content = downloaded_file.decode('utf-8')
             
             lines = content.strip().split('\n')
-            # ডাটাবেজে স্টোর করার সময়ও নাম্বারগুলোকে শুধু সংখ্যা আকারে ক্লিন করে রাখা হচ্ছে
             cleaned_numbers = [re.sub(r'\D', '', l) for l in lines if re.sub(r'\D', '', l)]
             
             if not cleaned_numbers: return
@@ -682,17 +689,14 @@ def admin_photo_payout(message):
 if __name__ == '__main__':
     load_db()
     
-    # থ্রেড ১: মেইন কাস্টমার ওটিপি এপিআই রানার (বট ১-এর ব্যাকগ্রাউন্ড কাজ)
     t1 = threading.Thread(target=sms_forwarder_loop, daemon=True)
     t1.start()
     
-    # থ্রেড ২: নতুন বটের নতুন এপিআই রানার (বট ২-এর ব্যাকগ্রাউন্ড কাজ)
     t2 = threading.Thread(target=new_bot_sms_loop, daemon=True)
     t2.start()
     
-    print("🤖 দুটি বটই সফলভাবে ব্যাকগ্রাউন্ডে চালু হয়েছে এবং ফাইল-ম্যাচিং ইনবক্স বাগটি ফিক্সড করা হয়েছে।")
+    print("🤖 দুটি বটই ব্যাকগ্রাউন্ডে চালু হয়েছে এবং ডুপ্লিকেট ইনবক্স লজিক পুরোপুরি ফিক্স করা হয়েছে।")
     
-    # মেইন থ্রেডে বট ১ এর পোলিং চালু রাখা হচ্ছে
     while True:
         try: 
             bot.polling(none_stop=True, timeout=40, long_polling_timeout=20)
