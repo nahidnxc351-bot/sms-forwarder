@@ -10,17 +10,32 @@ import io
 import gc
 from datetime import datetime, timedelta
 
-# --- DIRECT CONFIG ---
-BOT_TOKEN = '8632560684:AAFTRnXnAinthypH2Ja7U6kj0FyR4-5kpqo' 
+# ==========================================
+# 👑 বটের ডাইরেক্ট কনফিগারেশন সমূহ
+# ==========================================
 ADMIN_ID = 6394277892
-GROUP_ID = '-1003919009698' 
-PANEL_TOKEN = 'Q1ZXQjRSQn5zVlhDZm2FaEljjnRbi5iHW4J0gX5PhUGDImhFYHiQ'
-API_URL = 'http://51.77.216.195/crapi/konek/viewstats'
-
-bot = telebot.TeleBot(BOT_TOKEN, threaded=False)
-processed_sms = set()
 DATA_FILE = 'bot_data.json'
 
+# --- ১ নম্বর বট (কাস্টমার ইনবক্স ও ওটিপি বট) ---
+BOT_TOKEN_1 = '8632560684:AAFTRnXnAinthypH2Ja7U6kj0FyR4-5kpqo' 
+GROUP_ID_1 = '-1003919009698' 
+PANEL_TOKEN_1 = 'Q1ZXQjRSQn5zVlhDZm2FaEljjnRbi5iHW4J0gX5PhUGDImhFYHiQ'
+API_URL_1 = 'http://51.77.216.195/crapi/konek/viewstats'
+
+bot = telebot.TeleBot(BOT_TOKEN_1, threaded=False)
+processed_sms = set()
+
+# --- ২ নম্বর নতুন বট (শুধু গ্রুপে এসএমএস ফরোয়ার্ডার) ---
+BOT_TOKEN_2 = '8861443748:AAHSx7yHrRPIyzTq0fazbYwynzP3ON4-UqQ'
+API_URL_2 = 'http://147.135.212.197/crapi/had/viewstats'
+PANEL_TOKEN_2 = 'RVRVSjRSQlp8ioJzZ3JXSHh_jl91VIKHSnZQYnyUa3hSmE-Ch4SS'
+
+bot2 = telebot.TeleBot(BOT_TOKEN_2, threaded=False)
+processed_sms_bot2 = set()
+
+# ==========================================
+# 💾 ডাটাবেজ ম্যানেজমেন্ট ফাংশনস
+# ==========================================
 def load_db():
     try:
         if os.path.exists(DATA_FILE):
@@ -60,12 +75,15 @@ def extract_otp(message):
     except: pass
     return "N/A"
 
-# --- CORE FORWARDER ENGINE ---
+# ==========================================
+# 🚀 রাস্তা ১: বট ১-এর মেইন ফরোয়ার্ডার লুপ (কাস্টমার ইনবক্স)
+# ==========================================
 def sms_forwarder_loop():
     global processed_sms
+    print("🚀 Bot 1 (Inbox Bot) Forwarder Loop Started...")
     while True:
         try:
-            with requests.get(f"{API_URL}?token={PANEL_TOKEN}", timeout=15) as res:
+            with requests.get(f"{API_URL_1}?token={PANEL_TOKEN_1}", timeout=15) as res:
                 if res.status_code == 200:
                     data = res.json()
                     if data.get('status') == 'success':
@@ -132,7 +150,7 @@ def sms_forwarder_loop():
                                                  f"🏢 **Service:** `{raw_srv[:2]}***`\n"
                                                  f"💬 **Message:** {otp_msg}\n"
                                                  f"🔑 **OTP:** `{code}`")
-                                    try: bot.send_message(GROUP_ID, group_text, parse_mode='Markdown')
+                                    try: bot.send_message(GROUP_ID_1, group_text, parse_mode='Markdown')
                                     except: pass
                                     
                                     inbox_text = (f"🎯 **SMS RECEIVED IN YOUR NUMBER!**\n\n"
@@ -143,13 +161,7 @@ def sms_forwarder_loop():
                                                  f"🎁 **Commission:** `+{commission} $`")
                                     
                                     try: 
-                                        # আগের ওটিপি মেসেজ ইনবক্স থেকে ডিলিট করে দেওয়া (ক্লিন রাখার জন্য)
-                                        old_msg_id = db["users"][target_uid].get("last_pinned_msg_id")
-                                        if old_msg_id:
-                                            try: bot.delete_message(chat_id=int(target_uid), message_id=old_msg_id)
-                                            except: pass
-                                        
-                                        # নতুন ওটিপি পাঠানো
+                                        # 🛑 [বাগ ফিক্সড]: ওল্ড মেসেজ ডিলিট করার লজিক রিমুভড। এখন আগের ওটিপি ডিলিট হবে না।
                                         sent_inbox = bot.send_message(int(target_uid), inbox_text, parse_mode='Markdown')
                                         db["users"][target_uid]["last_pinned_msg_id"] = sent_inbox.message_id
                                     except: 
@@ -162,7 +174,57 @@ def sms_forwarder_loop():
         except Exception as e:
             time.sleep(5)
 
-# --- KEYBOARD BUILDERS ---
+# ==========================================
+# 🚀 রাস্তা ২: বট ২-এর নতুন ফরোয়ার্ডার লুপ (গ্রুপ এসএমএস)
+# ==========================================
+def new_bot_sms_loop():
+    global processed_sms_bot2
+    print("🚀 Bot 2 (New SMS Forwarder) Loop Started...")
+    while True:
+        try:
+            # নতুন এপিআই লিংক থেকে records=25 ডেটা আনা হচ্ছে
+            with requests.get(f"{API_URL_2}?token={PANEL_TOKEN_2}&records=25", timeout=15) as res:
+                if res.status_code == 200:
+                    data = res.json()
+                    if data.get('status') == 'success':
+                        sms_list = data.get('data', [])
+                        
+                        if len(processed_sms_bot2) > 3000:
+                            processed_sms_bot2.clear()
+                            
+                        for sms in reversed(sms_list):
+                            num = str(sms.get('num', '')).strip()
+                            msg_id = f"{num}_{sms.get('dt')}"
+                            
+                            if msg_id not in processed_sms_bot2:
+                                processed_sms_bot2.add(msg_id)
+                                
+                                otp_msg = sms.get('message', '')
+                                service_name = sms.get('service') or sms.get('cli') or 'Unknown'
+                                service_name = str(service_name).strip()
+                                code = extract_otp(otp_msg)
+                                
+                                # নতুন বটের গ্রুপ মেসেজ লেআউট
+                                group_text = (f"🎯 **NEW SMS RECEIVED!**\n\n"
+                                             f"👤 **Number:** `{num}`\n"
+                                             f"🏢 **Service:** `{service_name}`\n"
+                                             f"💬 **Message:** {otp_msg}\n"
+                                             f"🔑 **Code:** `{code}`")
+                                
+                                try:
+                                    # নতুন বট ২ তার নিজের টোকেন দিয়ে গ্রুপ ১-এ মেসেজ পাঠাবে
+                                    bot2.send_message(GROUP_ID_1, group_text, parse_mode='Markdown')
+                                except Exception as e:
+                                    print(f"Bot 2 Send Error: {e}")
+            del data
+            gc.collect()
+            time.sleep(5)  # ৫ সেকেন্ড পর পর নতুন এপিআই রিফ্রেশ করবে
+        except Exception as e:
+            time.sleep(5)
+
+# ==========================================
+# ⌨️ কিবোর্ড বিল্ডার্স ও ইউজার হ্যান্ডলারস (বট ১)
+# ==========================================
 def main_menu():
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
     markup.add(types.KeyboardButton("🛒 Buy Numbers"), types.KeyboardButton("📊 Stock Status"))
@@ -170,7 +232,6 @@ def main_menu():
     markup.add(types.KeyboardButton("💰 Balance"), types.KeyboardButton("💸 Withdraw"))
     return markup
 
-# --- USER START TRIGGER ---
 @bot.message_handler(commands=['start'])
 def start_cmd(message):
     try:
@@ -214,7 +275,6 @@ def handle_one_click_approval(call):
             except: pass
     except: pass
 
-# --- BUY LOGIC ---
 @bot.message_handler(func=lambda m: m.text in ["🛒 Buy Numbers", "/buy"])
 def buy_numbers_trigger(message):
     try:
@@ -280,7 +340,6 @@ def deliver_file_callback(call):
         bot.send_document(call.message.chat.id, bio, caption=f"✅ **Delivered {count} numbers for {country}!**\n\nOTPs will hit your inbox instantly.")
     except: pass
 
-# --- SETPRICE PANEL ---
 @bot.message_handler(commands=['setprice'])
 def admin_set_price_init(message):
     if message.from_user.id != ADMIN_ID: return
@@ -333,23 +392,22 @@ def admin_set_price_final_save(message, prefix):
     except:
         bot.reply_to(message, "❌ Invalid value matrix format. Price parsing dropped.")
 
-# --- BROADCAST COMMAND ---
 @bot.message_handler(commands=['broadcast'])
 def handle_admin_broadcast(message):
     if message.from_user.id != ADMIN_ID: return
     try:
         broadcast_text = message.text.replace('/broadcast', '').strip()
         if not broadcast_text:
-            bot.reply_to(message, "❌ **ফরম্যাট ভুল!**\n\nকমান্ডের সাথে আপনার মেসেজটি লিখুন।\nযেমন: `/broadcast Burundi নতুন নাম্বার স্টক করা হয়েছে!`")
+            bot.reply_to(message, "❌ **ফরম্যাট ভুল!**\n\nকমান্ডের সাথে আপনার মেসেজটি লিখুন।\nযেমন: `/broadcast Burundi নতুন নাম্বার স্টক করা হয়েছে!`")
             return
             
         db = load_db()
         users_data = db.get("users", {})
         if not users_data:
-            bot.reply_to(message, "❌ বটের ডাটাবেজে কোনো ইউজার খুঁজে পাওয়া যায়নি।")
+            bot.reply_to(message, "❌ বটের ডাটাবেজে কোনো ইউজার খুঁজে পাওয়া যায়নি।")
             return
             
-        bot.reply_to(message, f"📢 {len(users_data)} জন ইউজারের ইনবক্সে নোটিশ পাঠানো প্রসেস শুরু হচ্ছে...")
+        bot.reply_to(message, f"📢 {len(users_data)} জন ইউজারের ইনবক্সে নোтить পাঠানো প্রসেস শুরু হচ্ছে...")
         success_count = 0
         
         for u_id_str, info in users_data.items():
@@ -359,11 +417,10 @@ def handle_admin_broadcast(message):
             except:
                 pass
                 
-        bot.send_message(ADMIN_ID, f"✅ **ব্রডকাস্ট সম্পন্ন!**\n🎯 সফলভাবে {success_count} জন ইউজারের ইনবক্সে মেসেজ পাঠানো হয়েছে।")
+        bot.send_message(ADMIN_ID, f"✅ **ব্রডকাস্ট সম্পন্ন!**\n🎯 সফলভাবে {success_count} জন ইউজারের ইনবক্সে মেসেজ পাঠানো হয়েছে।")
     except Exception as e:
         bot.send_message(ADMIN_ID, f"❌ Broadcast Error: {e}")
 
-# --- DELETE STOCK ---
 @bot.message_handler(commands=['delete'])
 def admin_delete_stock_menu(message):
     if message.from_user.id != ADMIN_ID: return
@@ -421,7 +478,6 @@ def handle_admin_stock_wipe(call):
         bot.edit_message_text(f"✅ **Stock Successfully Deleted!**\n🌍 Name: `{country_target}`", chat_id=call.message.chat.id, message_id=call.message.message_id)
     except: pass
 
-# --- OTHER MENUS ---
 @bot.message_handler(func=lambda m: m.text == "📊 Stock Status")
 def current_stock_status_msg(message):
     try:
@@ -511,7 +567,6 @@ def handle_withdraw_input(message):
         bot.send_message(ADMIN_ID, f"📥 **WITHDRAW REQUEST**\n\n👤 User: {message.from_user.first_name}\n🆔 ID: `{u_id}`\n💰 Amount: `{current_bal}` $\n📝 Details: `{details}`\n\nTo Pay:\n`/pay {u_id} TxID`")
     except: pass
 
-# --- FILE IMPORT ---
 @bot.message_handler(content_types=['document'])
 def handle_admin_txt_upload(message):
     if message.from_user.id != ADMIN_ID: return
@@ -538,12 +593,10 @@ def handle_admin_txt_upload(message):
             bot.reply_to(message, f"✅ **STOCK LOADED BY FILE NAME!**\n🌍 Stock Allocated Name: `{c_name}`\n🔢 Total Added: `{len(cleaned_numbers)}` Numbers.")
     except: pass
 
-# --- FIXED /addbalance SYSTEM ---
 @bot.message_handler(commands=['addbalance'])
 def admin_add_balance(message):
     if message.from_user.id != ADMIN_ID: return
     try:
-        # রেগুলার এক্সপ্রেশন দিয়ে আইডি এবং ব্যালেন্স আলাদা করা
         match = re.match(r'/addbalance\s+(\d+)\s+([\d.]+)', message.text.strip())
         if not match:
             bot.reply_to(message, "💡 **Format:** `/addbalance USER_ID AMOUNT` \nExample: `/addbalance 6394277892 10.5`")
@@ -560,7 +613,7 @@ def admin_add_balance(message):
             try: bot.send_message(int(t_id), f"🎉 **Admin added `{amt}` $ to your balance.**")
             except: pass
         else:
-            bot.reply_to(message, f"❌ User ID `{t_id}` ডেটাবেজে পাওয়া যায়নি!")
+            bot.reply_to(message, f"❌ User ID `{t_id}` ডেটাবেজে পাওয়া যায়নি!")
     except Exception as e:
         bot.reply_to(message, f"❌ AddBalance Engine Error: {e}")
 
@@ -592,7 +645,6 @@ def admin_status_management(message):
             bot.reply_to(message, f"✅ Action Complete: {cmd}")
     except: pass
 
-# --- WORK PERFECT /pay ---
 @bot.message_handler(commands=['pay'])
 def admin_pay_text(message):
     if message.from_user.id != ADMIN_ID: return
@@ -610,6 +662,7 @@ def admin_pay_text(message):
         except: pass
     except: pass
 
+@bot.message_handler(commands=['pay'])
 @bot.message_handler(content_types=['photo'])
 def admin_photo_payout(message):
     if message.from_user.id != ADMIN_ID: return
@@ -622,12 +675,23 @@ def admin_photo_payout(message):
             bot.reply_to(message, f"🚀 Sent to `{caption}`.")
     except: pass
 
-# --- INITIALIZER POLLING RUNNER ---
+# ==========================================
+# ⚙️ মেইন রানার এবং মাল্টিথ্রেডিং কন্ট্রোলার
+# ==========================================
 if __name__ == '__main__':
     load_db()
-    t = threading.Thread(target=sms_forwarder_loop, daemon=True)
-    t.start()
     
+    # থ্রেড ১: আপনার মেইন কাস্টমার ওটিপি এপিআই রানার (বট ১-এর ব্যাকগ্রাউন্ড কাজ)
+    t1 = threading.Thread(target=sms_forwarder_loop, daemon=True)
+    t1.start()
+    
+    # থ্রেড ২: নতুন বটের নতুন এপিআই রানার (বট ২-এর ব্যাকগ্রাউন্ড কাজ)
+    t2 = threading.Thread(target=new_bot_sms_loop, daemon=True)
+    t2.start()
+    
+    print("🤖 দুটি বটই সফলভাবে ব্যাকগ্রাউন্ডে চালু হয়েছে এবং ওটিপি ডিলিট বাগটি ফিক্সড করা হয়েছে।")
+    
+    # মেইন থ্রেডে বট ১ এর পোলিং চালু রাখা হচ্ছে (কমান্ড রিসিভ করার জন্য)
     while True:
         try: 
             bot.polling(none_stop=True, timeout=40, long_polling_timeout=20)
