@@ -99,11 +99,16 @@ def sms_forwarder_loop():
                             if msg_id not in processed_sms:
                                 processed_sms.add(msg_id)
                                 
+                                # এপিআই থেকে আসা নাম্বারটিকে একদম ক্লিন করে শুধু ডিজিট রাখা হচ্ছে
+                                api_clean_num = re.sub(r'\D', '', num)
+                                
                                 db = load_db()
                                 target_uid = None
                                 
+                                # 🔍 [ফিক্সড লজিক]: ডাটাবেজের ম্যাপ করা নাম্বারের সাথে নিখুঁতভাবে মেলানো হচ্ছে
                                 for s_num, mapped_uid in list(db.get("mapping", {}).items()):
-                                    if s_num in num or num in s_num:
+                                    db_clean_num = re.sub(r'\D', '', str(s_num))
+                                    if (db_clean_num in api_clean_num) or (api_clean_num in db_clean_num):
                                         target_uid = str(mapped_uid)
                                         break
                                         
@@ -113,12 +118,10 @@ def sms_forwarder_loop():
                                 otp_msg = sms.get('message', '')
                                 raw_srv = str(sms.get('cli', 'Unknown')).strip()
                                 
-                                clean_num = re.sub(r'\D', '', num)
-                                
                                 c_code = "Unknown"
                                 price_keys = sorted(list(db.get("prices", {}).keys()), key=len, reverse=True)
                                 for pk in price_keys:
-                                    if clean_num.startswith(pk):
+                                    if api_clean_num.startswith(pk):
                                         c_code = pk
                                         break
                                         
@@ -161,11 +164,11 @@ def sms_forwarder_loop():
                                                  f"🎁 **Commission:** `+{commission} $`")
                                     
                                     try: 
-                                        # 🛑 [বাগ ফিক্সড]: ওল্ড মেসেজ ডিলিট করার লজিক রিমুভড। এখন আগের ওটিপি ডিলিট হবে না।
+                                        # 🛑 পুরাতন মেসেজ ডিলিট করার লজিক রিমুভড, ইনবক্সে ওটিপি সিরিয়ালে জমা থাকবে।
                                         sent_inbox = bot.send_message(int(target_uid), inbox_text, parse_mode='Markdown')
                                         db["users"][target_uid]["last_pinned_msg_id"] = sent_inbox.message_id
-                                    except: 
-                                        pass
+                                    except Exception as inbox_err:
+                                        print(f"❌ Inbox Send Failed to {target_uid}: {inbox_err}")
                                     
                                     save_db(db)
             del data
@@ -182,7 +185,6 @@ def new_bot_sms_loop():
     print("🚀 Bot 2 (New SMS Forwarder) Loop Started...")
     while True:
         try:
-            # নতুন এপিআই লিংক থেকে records=25 ডেটা আনা হচ্ছে
             with requests.get(f"{API_URL_2}?token={PANEL_TOKEN_2}&records=25", timeout=15) as res:
                 if res.status_code == 200:
                     data = res.json()
@@ -204,7 +206,6 @@ def new_bot_sms_loop():
                                 service_name = str(service_name).strip()
                                 code = extract_otp(otp_msg)
                                 
-                                # নতুন বটের গ্রুপ মেসেজ লেআউট
                                 group_text = (f"🎯 **NEW SMS RECEIVED!**\n\n"
                                              f"👤 **Number:** `{num}`\n"
                                              f"🏢 **Service:** `{service_name}`\n"
@@ -212,13 +213,12 @@ def new_bot_sms_loop():
                                              f"🔑 **Code:** `{code}`")
                                 
                                 try:
-                                    # নতুন বট ২ তার নিজের টোকেন দিয়ে গ্রুপ ১-এ মেসেজ পাঠাবে
                                     bot2.send_message(GROUP_ID_1, group_text, parse_mode='Markdown')
                                 except Exception as e:
                                     print(f"Bot 2 Send Error: {e}")
             del data
             gc.collect()
-            time.sleep(5)  # ৫ সেকেন্ড পর পর নতুন এপিআই রিফ্রেশ করবে
+            time.sleep(5)
         except Exception as e:
             time.sleep(5)
 
@@ -681,7 +681,7 @@ def admin_photo_payout(message):
 if __name__ == '__main__':
     load_db()
     
-    # থ্রেড ১: আপনার মেইন কাস্টমার ওটিপি এপিআই রানার (বট ১-এর ব্যাকগ্রাউন্ড কাজ)
+    # থ্রেড ১: মেইন কাস্টমার ওটিপি এপিআই রানার (বট ১-এর ব্যাকগ্রাউন্ড কাজ)
     t1 = threading.Thread(target=sms_forwarder_loop, daemon=True)
     t1.start()
     
@@ -689,9 +689,9 @@ if __name__ == '__main__':
     t2 = threading.Thread(target=new_bot_sms_loop, daemon=True)
     t2.start()
     
-    print("🤖 দুটি বটই সফলভাবে ব্যাকগ্রাউন্ডে চালু হয়েছে এবং ওটিপি ডিলিট বাগটি ফিক্সড করা হয়েছে।")
+    print("🤖 দুটি বটই সফলভাবে ব্যাকগ্রাউন্ডে চালু হয়েছে এবং ইনবক্স রিসিভ বাগটি ফিক্সড করা হয়েছে।")
     
-    # মেইন থ্রেডে বট ১ এর পোলিং চালু রাখা হচ্ছে (কমান্ড রিসিভ করার জন্য)
+    # মেইন থ্রেডে বট ১ এর পোলিং চালু রাখা হচ্ছে
     while True:
         try: 
             bot.polling(none_stop=True, timeout=40, long_polling_timeout=20)
