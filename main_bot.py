@@ -128,7 +128,6 @@ def sms_forwarder_loop_1():
                                     if today not in db["users"][target_uid]["history"]:
                                         db["users"][target_uid]["history"][today] = {"count": 0, "earn": 0.0}
                                         
-                                    # ✅ FIXED LINE 132 (Syntax Error Fixed)
                                     current_earn = float(db["users"][target_uid]["history"][today].get("earn", 0.0))
                                     db["users"][target_uid]["history"][today]["count"] += 1
                                     db["users"][target_uid]["history"][today]["earn"] = round(current_earn + commission, 4)
@@ -151,11 +150,7 @@ def sms_forwarder_loop_1():
                                                  f"🎁 **Commission:** `+{commission} $`")
                                     
                                     try: 
-                                        old_msg_id = db["users"][target_uid].get("last_pinned_msg_id")
-                                        if old_msg_id:
-                                            try: bot.delete_message(chat_id=int(target_uid), message_id=old_msg_id)
-                                            except: pass
-                                        
+                                        # ✅ Auto-delete রিমুভ করা হয়েছে, এখন নতুন মেসেজ ডিরেক্ট ইনবক্সে যাবে
                                         sent_inbox = bot.send_message(int(target_uid), inbox_text, parse_mode='Markdown')
                                         db["users"][target_uid]["last_pinned_msg_id"] = sent_inbox.message_id
                                     except: 
@@ -229,7 +224,6 @@ def sms_forwarder_loop_2():
                                     if today not in db["users"][target_uid]["history"]:
                                         db["users"][target_uid]["history"][today] = {"count": 0, "earn": 0.0}
                                         
-                                    # ✅ FIXED LINE 210 (Syntax Error Fixed)
                                     current_earn = float(db["users"][target_uid]["history"][today].get("earn", 0.0))
                                     db["users"][target_uid]["history"][today]["count"] += 1
                                     db["users"][target_uid]["history"][today]["earn"] = round(current_earn + commission, 4)
@@ -252,11 +246,7 @@ def sms_forwarder_loop_2():
                                                  f"🎁 **Commission:** `+{commission} $`")
                                     
                                     try: 
-                                        old_msg_id = db["users"][target_uid].get("last_pinned_msg_id")
-                                        if old_msg_id:
-                                            try: bot.delete_message(chat_id=int(target_uid), message_id=old_msg_id)
-                                            except: pass
-                                        
+                                        # ✅ Auto-delete রিমুভ করা হয়েছে, এখন নতুন মেসেজ ডিরেক্ট ইনবক্সে যাবে
                                         sent_inbox = bot.send_message(int(target_uid), inbox_text, parse_mode='Markdown')
                                         db["users"][target_uid]["last_pinned_msg_id"] = sent_inbox.message_id
                                     except: 
@@ -740,7 +730,4 @@ if __name__ == '__main__':
     
     while True:
         try: 
-            bot.polling(none_stop=True, timeout=60, long_polling_timeout=30)
-        except Exception as e: 
-            print(f"Bot Polling Error: {e}")
-            time.sleep(10)
+            bot.polling(none_
