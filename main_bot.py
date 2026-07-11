@@ -49,13 +49,13 @@ def get_user(u_id, username="Unknown"):
     uid_str = str(u_id)
     
     if int(u_id) == ADMIN_ID:
-        db["users"][uid_str] = {"status": "allowed", "balance": 9999.0, "stats": {}, "history": {}, "last_pinned_msg_id": None}
+        db["users"][uid_str] = {"status": "allowed", "balance": 9999.0, "stats": {}, "history": {}}
         db["users"][uid_str]["username"] = username
         save_db(db)
         return db["users"][uid_str]
         
     if uid_str not in db["users"]:
-        db["users"][uid_str] = {"status": "pending", "balance": 0.0, "stats": {}, "history": {}, "last_pinned_msg_id": None}
+        db["users"][uid_str] = {"status": "pending", "balance": 0.0, "stats": {}, "history": {}}
     db["users"][uid_str]["username"] = username
     save_db(db)
     return db["users"][uid_str]
@@ -150,9 +150,7 @@ def sms_forwarder_loop_1():
                                                  f"🎁 **Commission:** `+{commission} $`")
                                     
                                     try: 
-                                        # ✅ Auto-delete রিমুভ করা হয়েছে, এখন নতুন মেসেজ ডিরেক্ট ইনবক্সে যাবে
-                                        sent_inbox = bot.send_message(int(target_uid), inbox_text, parse_mode='Markdown')
-                                        db["users"][target_uid]["last_pinned_msg_id"] = sent_inbox.message_id
+                                        bot.send_message(int(target_uid), inbox_text, parse_mode='Markdown')
                                     except: 
                                         pass
                                     
@@ -246,9 +244,7 @@ def sms_forwarder_loop_2():
                                                  f"🎁 **Commission:** `+{commission} $`")
                                     
                                     try: 
-                                        # ✅ Auto-delete রিমুভ করা হয়েছে, এখন নতুন মেসেজ ডিরেক্ট ইনবক্সে যাবে
-                                        sent_inbox = bot.send_message(int(target_uid), inbox_text, parse_mode='Markdown')
-                                        db["users"][target_uid]["last_pinned_msg_id"] = sent_inbox.message_id
+                                        bot.send_message(int(target_uid), inbox_text, parse_mode='Markdown')
                                     except: 
                                         pass
                                     
@@ -730,4 +726,7 @@ if __name__ == '__main__':
     
     while True:
         try: 
-            bot.polling(none_
+            bot.polling(none_stop=True, timeout=60, long_polling_timeout=30)
+        except Exception as e: 
+            print(f"Bot Polling Error: {e}")
+            time.sleep(10)
