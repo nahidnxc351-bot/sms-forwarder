@@ -76,7 +76,7 @@ def extract_otp(message):
     return "N/A"
 
 # ==========================================
-# 🚀 রাস্তা ১: বট ১-এর মেইন ফরোয়ার্ডার লুপ (কাস্টমার ইনবক্স)
+# 🚀 রাস্তা ১: বট ১-এর মেইন ফরোয়ার্ডার লুপ (গ্রুপ + কাস্টমার ইনবক্স ম্যাচিং)
 # ==========================================
 def sms_forwarder_loop():
     global processed_sms
@@ -99,78 +99,77 @@ def sms_forwarder_loop():
                             if msg_id not in processed_sms:
                                 processed_sms.add(msg_id)
                                 
-                                # এপিআই থেকে আসা নাম্বারটিকে একদম ক্লিন করে শুধু ডিজিট রাখা হচ্ছে
+                                # এপিআই থেকে আসা নাম্বার ক্লিন করা হচ্ছে (শুধু সংখ্যা রাখা হচ্ছে)
                                 api_clean_num = re.sub(r'\D', '', num)
                                 
                                 db = load_db()
                                 target_uid = None
                                 
-                                # 🔍 [ফিক্সড লজিক]: ডাটাবেজের ম্যাপ করা নাম্বারের সাথে নিখুঁতভাবে মেলানো হচ্ছে
+                                # 🔍 [সুপার ফিক্সড লজিক]: ফাইল কেনা নাম্বারের সাথে এপিআই নাম্বারের নিখুঁত ম্যাচিং
                                 for s_num, mapped_uid in list(db.get("mapping", {}).items()):
                                     db_clean_num = re.sub(r'\D', '', str(s_num))
-                                    if (db_clean_num in api_clean_num) or (api_clean_num in db_clean_num):
+                                    # শেষের ৮-১০ ডিজিট মিললেও যাতে ম্যাচ করে, প্লাস চিহ্নের ঝামেলা এড়াতে
+                                    if (db_clean_num in api_clean_num) or (api_clean_num in db_clean_num) or (api_clean_num[-9:] == db_clean_num[-9:]):
                                         target_uid = str(mapped_uid)
                                         break
-                                        
-                                if not target_uid:
-                                    continue
-                                    
+                                
                                 otp_msg = sms.get('message', '')
                                 raw_srv = str(sms.get('cli', 'Unknown')).strip()
+                                code = extract_otp(otp_msg)
                                 
-                                c_code = "Unknown"
-                                price_keys = sorted(list(db.get("prices", {}).keys()), key=len, reverse=True)
-                                for pk in price_keys:
-                                    if api_clean_num.startswith(pk):
-                                        c_code = pk
-                                        break
-                                        
-                                commission = float(db.get("prices", {}).get(c_code, 0.0))
+                                # 📢 ১. গ্রুপে মেসেজ পাঠানো (এটি সবসময় যাবে)
+                                group_text = (f"📩 **NEW SMS RECEIVED!**\n\n"
+                                             f"👤 **Number:** `{num}`\n"
+                                             f"🏢 **Service:** `{raw_srv[:2]}***`\n"
+                                             f"💬 **Message:** {otp_msg}\n"
+                                             f"🔑 **OTP:** `{code}`")
+                                try: bot.send_message(GROUP_ID_1, group_text, parse_mode='Markdown')
+                                except: pass
                                 
-                                if target_uid in db["users"]:
-                                    if db["users"][target_uid].get("status") != 'allowed':
-                                        continue
+                                # 🎯 ২. ফাইল কেনা কাস্টমারের ইনবক্সে মেসেজ পাঠানো
+                                if target_uid:
+                                    c_code = "Unknown"
+                                    price_keys = sorted(list(db.get("prices", {}).keys()), key=len, reverse=True)
+                                    for pk in price_keys:
+                                        if api_clean_num.startswith(pk):
+                                            c_code = pk
+                                            break
+                                            
+                                    commission = float(db.get("prices", {}).get(c_code, 0.0))
+                                    
+                                    if target_uid in db["users"]:
+                                        if db["users"][target_uid].get("status") != 'allowed':
+                                            continue
+                                            
+                                        today = datetime.now().strftime('%Y-%m-%d')
+                                        db["users"][target_uid]["balance"] = round(float(db["users"][target_uid].get("balance", 0.0)) + commission, 4)
                                         
-                                    today = datetime.now().strftime('%Y-%m-%d')
-                                    db["users"][target_uid]["balance"] = round(float(db["users"][target_uid].get("balance", 0.0)) + commission, 4)
-                                    
-                                    if "stats" not in db["users"][target_uid]: db["users"][target_uid]["stats"] = {}
-                                    db["users"][target_uid]["stats"][c_code] = db["users"][target_uid]["stats"].get(c_code, 0) + 1
-                                    
-                                    if "history" not in db["users"][target_uid] or isinstance(db["users"][target_uid]["history"], list):
-                                        db["users"][target_uid]["history"] = {}
+                                        if "stats" not in db["users"][target_uid]: db["users"][target_uid]["stats"] = {}
+                                        db["users"][target_uid]["stats"][c_code] = db["users"][target_uid]["stats"].get(c_code, 0) + 1
                                         
-                                    if today not in db["users"][target_uid]["history"]:
-                                        db["users"][target_uid]["history"][today] = {"count": 0, "earn": 0.0}
+                                        if "history" not in db["users"][target_uid] or isinstance(db["users"][target_uid]["history"], list):
+                                            db["users"][target_uid]["history"] = {}
+                                            
+                                        if today not in db["users"][target_uid]["history"]:
+                                            db["users"][target_uid]["history"][today] = {"count": 0, "earn": 0.0}
+                                            
+                                        db["users"][target_uid]["history"][today]["count"] += 1
+                                        db["users"][target_uid]["history"][today]["earn"] = round(float(db["users"][target_uid]["history"][today].get("earn", 0.0)) + commission, 4)
                                         
-                                    db["users"][target_uid]["history"][today]["count"] += 1
-                                    db["users"][target_uid]["history"][today]["earn"] = round(float(db["users"][target_uid]["history"][today].get("earn", 0.0)) + commission, 4)
-                                    
-                                    code = extract_otp(otp_msg)
-                                    
-                                    group_text = (f"📩 **NEW SMS RECEIVED!**\n\n"
-                                                 f"👤 **Number:** `{num}`\n"
-                                                 f"🏢 **Service:** `{raw_srv[:2]}***`\n"
-                                                 f"💬 **Message:** {otp_msg}\n"
-                                                 f"🔑 **OTP:** `{code}`")
-                                    try: bot.send_message(GROUP_ID_1, group_text, parse_mode='Markdown')
-                                    except: pass
-                                    
-                                    inbox_text = (f"🎯 **SMS RECEIVED IN YOUR NUMBER!**\n\n"
-                                                 f"👤 **Number:** `{num}`\n"
-                                                 f"🏢 **Service:** `{raw_srv}`\n"
-                                                 f"💬 **Message:** {otp_msg}\n"
-                                                 f"🔑 **Code:** `{code}`\n"
-                                                 f"🎁 **Commission:** `+{commission} $`")
-                                    
-                                    try: 
-                                        # 🛑 পুরাতন মেসেজ ডিলিট করার লজিক রিমুভড, ইনবক্সে ওটিপি সিরিয়ালে জমা থাকবে।
-                                        sent_inbox = bot.send_message(int(target_uid), inbox_text, parse_mode='Markdown')
-                                        db["users"][target_uid]["last_pinned_msg_id"] = sent_inbox.message_id
-                                    except Exception as inbox_err:
-                                        print(f"❌ Inbox Send Failed to {target_uid}: {inbox_err}")
-                                    
-                                    save_db(db)
+                                        inbox_text = (f"🎯 **SMS RECEIVED IN YOUR NUMBER!**\n\n"
+                                                     f"👤 **Number:** `{num}`\n"
+                                                     f"🏢 **Service:** `{raw_srv}`\n"
+                                                     f"💬 **Message:** {otp_msg}\n"
+                                                     f"🔑 **Code:** `{code}`\n"
+                                                     f"🎁 **Commission:** `+{commission} $`")
+                                        
+                                        try: 
+                                            sent_inbox = bot.send_message(int(target_uid), inbox_text, parse_mode='Markdown')
+                                            db["users"][target_uid]["last_pinned_msg_id"] = sent_inbox.message_id
+                                        except Exception as inbox_err:
+                                            print(f"❌ Inbox Send Failed to {target_uid}: {inbox_err}")
+                                        
+                                        save_db(db)
             del data
             gc.collect()
             time.sleep(5)
@@ -328,6 +327,7 @@ def deliver_file_callback(call):
         db["stock"][country] = db["stock"][country][count:]
         
         for num in selected:
+            # নাম্বারটি ডাটাবেজে ম্যাপ করা হচ্ছে ইউজারের সাথে
             db["mapping"][str(num)] = u_id
         save_db(db)
         
@@ -580,6 +580,7 @@ def handle_admin_txt_upload(message):
             content = downloaded_file.decode('utf-8')
             
             lines = content.strip().split('\n')
+            # ডাটাবেজে স্টোর করার সময়ও নাম্বারগুলোকে শুধু সংখ্যা আকারে ক্লিন করে রাখা হচ্ছে
             cleaned_numbers = [re.sub(r'\D', '', l) for l in lines if re.sub(r'\D', '', l)]
             
             if not cleaned_numbers: return
@@ -689,7 +690,7 @@ if __name__ == '__main__':
     t2 = threading.Thread(target=new_bot_sms_loop, daemon=True)
     t2.start()
     
-    print("🤖 দুটি বটই সফলভাবে ব্যাকগ্রাউন্ডে চালু হয়েছে এবং ইনবক্স রিসিভ বাগটি ফিক্সড করা হয়েছে।")
+    print("🤖 দুটি বটই সফলভাবে ব্যাকগ্রাউন্ডে চালু হয়েছে এবং ফাইল-ম্যাচিং ইনবক্স বাগটি ফিক্সড করা হয়েছে।")
     
     # মেইন থ্রেডে বট ১ এর পোলিং চালু রাখা হচ্ছে
     while True:
